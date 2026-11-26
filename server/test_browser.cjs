@@ -7,6 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { once } = require("node:events");
 const { randomBytes } = require("node:crypto");
+const { startWindowPlayers, verifyWindowIsolation } = require("./test_window_capture.cjs");
 
 async function account(page, url, user, password, register) {
   await page.goto(url);
@@ -94,7 +95,7 @@ async function run() {
         ],
         { windowsHide: true },
       );
-  let browser, bridgeErrors="";
+  let browser, windowPlayers, bridgeErrors="";
   service?.stderr.on("data",chunk=>{
     for(const line of chunk.toString().split("\n")) if (/Exception|Error:|bridge failed|RuntimeError|Traceback|rtc_audio.py|media.py|ffi_client.py/i.test(line))
       bridgeErrors+=(line.split("?")[0].replace(/[a-zA-Z0-9_-]{35,}/g,"[redacted]")+"\n").slice(0,240);
@@ -104,9 +105,11 @@ async function run() {
       const [line] = await once(service.stdout, "data");
       url = line.toString().trim();
     }
+    if (process.argv.includes("--native-window")) windowPlayers = await startWindowPlayers(dir);
     browser = await chromium.launch({
+      headless: !windowPlayers,
       executablePath: process.env.CHROME_BIN,
-      args: ["--mute-audio","--allow-loopback-in-peer-connection"],
+      args: ["--mute-audio","--allow-loopback-in-peer-connection", ...(windowPlayers?.args || [])],
     });
     const host = await browser.newPage();
     if (process.argv.includes("--desktop-listener")) {
@@ -126,11 +129,20 @@ async function run() {
     await host.waitForSelector("#auth:visible");
     await account(host, url, "webQA_" + suffix, password, false);
     await account(listener, url, "listenerQA_" + suffix, password, true);
-    // Only the browser chooser is replaced. The real Worklet, HTTP PCM upload,
-    // second browser's read, PCM decoder and scheduled playback all run.
+    const originalPicker = windowPlayers && await host.evaluateHandle(() => navigator.mediaDevices.getDisplayMedia);
+    // Simulate chooser outcomes, then use the native picker for the host when requested.
     for (const page of [host, listener])
       await page.evaluate(() => {
-        navigator.mediaDevices.getDisplayMedia = async () => {
+        window.selection = {surface: "browser", label: "Tab audio"};
+        navigator.mediaDevices.getDisplayMedia = async (options) => {
+          window.captureOptions = options;
+          const {surface, label} = window.selection;
+          const canvas = document.createElement("canvas");
+          canvas.width = canvas.height = 8;
+          const video = canvas.captureStream().getVideoTracks()[0];
+          video.getSettings = () => ({ displaySurface: surface });
+          const stream = window.lastSelection = new MediaStream([video]);
+          if (!label) return stream;
           const ctx = new AudioContext(),
             osc = ctx.createOscillator(),
             dest = ctx.createMediaStreamDestination();
@@ -138,11 +150,10 @@ async function run() {
           osc.connect(dest);
           osc.start();
           await ctx.resume();
-          const canvas = document.createElement("canvas");
-          canvas.width = canvas.height = 8;
-          const video = canvas.captureStream().getVideoTracks()[0];
-          video.getSettings = () => ({ displaySurface: "browser" });
-          return new MediaStream([video, ...dest.stream.getAudioTracks()]);
+          const audio = dest.stream.getAudioTracks()[0];
+          Object.defineProperty(audio, "label", {value: label});
+          stream.addTrack(audio);
+          return stream;
         };
       });
     if (useRTC) {
@@ -168,6 +179,29 @@ async function run() {
       null,
       "测试需要空闲房间",
     );
+    let requests = 0;
+    host.on("request", r => { if (new URL(r.url()).pathname === "/api/stage/request") requests++; });
+    for (const [surface, label, message] of [
+      ["window", "", "窗口没有音轨"], ["browser", "", "标签页没有音轨"],
+      ["window", "System Audio", "整个系统的声音"], ["browser", "System Audio", "整个系统的声音"],
+      ["window", "Unknown", "无法确认音轨"],
+      ["monitor", "System Audio", "请选择应用窗口"], ["", "Application Audio", "请选择应用窗口"],
+    ]) {
+      await host.evaluate(s => window.selection = s, {surface, label});
+      await host.click("#stage");
+      await host.waitForFunction(m => document.querySelector("#notice").textContent.includes(m) &&
+        window.lastSelection.getTracks().every(t => t.readyState === "ended"), message);
+      assert.equal(requests, 0);
+    }
+    assert.deepEqual(await host.evaluate(() => [
+      captureOptions.windowAudio, captureOptions.systemAudio, captureOptions.monitorTypeSurfaces
+    ]), ["window", "exclude", "exclude"]);
+    if (windowPlayers) {
+      await host.evaluate(picker => navigator.mediaDevices.getDisplayMedia = picker, originalPicker);
+      await host.bringToFront();
+    } else {
+      await host.evaluate(() => window.selection = {surface: "window", label: "Application Audio"});
+    }
     await host.click("#stage");
     await host.waitForFunction(
       () => document.querySelector("#stage").textContent === "下台",
@@ -235,6 +269,8 @@ async function run() {
       await listener.waitForFunction(() => window.samplesReceived > 0, null, {timeout:15000});
     }
     assert.match(await listener.textContent("#hostInfo"), /96 kHz · 24-bit/);
+    assert.equal(await listener.textContent("#source"), "应用窗口");
+    if (windowPlayers) await verifyWindowIsolation(listener, windowPlayers);
     if (process.env.AUDIMATE_SCREENSHOTS) {
       await host.screenshot({path:path.join(process.env.AUDIMATE_SCREENSHOTS,"room.png"),fullPage:true});
       await listener.screenshot({path:path.join(process.env.AUDIMATE_SCREENSHOTS,"listener-mobile.png"),fullPage:true});
@@ -253,6 +289,7 @@ async function run() {
     await host.waitForFunction(() =>
       document.querySelector("#hostInfo").textContent.includes("44.1 kHz"),
     );
+    assert.equal(await host.textContent("#source"), "浏览器标签页");
     await listener.click("#stage");
     await listener.waitForFunction(
       () => document.querySelector("#source").textContent === "等待主持上台",
@@ -270,11 +307,12 @@ async function run() {
     }
     console.log(
       useRTC ? "PASS: audible native Opus, shared PCM-to-Opus, lossless reception, RTC telemetry and persistent subscription across hosts" :
-        "PASS: browser register/login/logout, tab audio upload, live playback, host reject/accept/handoff, step-down, mobile width",
+        "PASS: chooser constraints, rejected sources released, window audio upload and playback, tab handoff, mobile width",
     );
   } finally {
     if (sfu) sfu.kill();
     if (browser) await browser.close();
+    if (windowPlayers) await windowPlayers.close();
     if (service) {
       const exited = once(service, "exit");
       service.kill();

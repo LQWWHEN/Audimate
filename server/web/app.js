@@ -184,7 +184,7 @@ function render(state) {
       ? "已申请主持"
       : h
         ? "申请主持"
-        : "主持 · 共享标签页";
+        : "主持 · 共享音频";
   $("stage").disabled = room.pending || requesting;
   $("cancel").hidden = !room.pending;
   $("quality").disabled = room.hosting || room.pending || requesting;
@@ -241,6 +241,23 @@ async function leave() {
   }
 }
 $("cancel").onclick = leave;
+function sharedAudioSource(stream) {
+  const surface = stream.getVideoTracks()[0]?.getSettings().displaySurface;
+  if (surface !== "window" && surface !== "browser")
+    throw Error("请选择应用窗口或浏览器标签页，避免共享整个屏幕的声音。");
+  const tracks = stream.getAudioTracks();
+  if (!tracks.length || tracks[0].readyState !== "live")
+    throw Error(surface === "browser"
+      ? "标签页没有音轨。请重新选择播放音乐的标签页，并勾选共享标签页音频。"
+      : "窗口没有音轨。请重新选择并勾选共享应用音频；若没有此选项，可用 Windows 客户端按进程共享。");
+  // Chromium can return system loopback for a window even with windowAudio: "window".
+  // Its application loopback track has the specific, non-localized label "Application Audio".
+  if (tracks.some(track => track.label === "System Audio"))
+    throw Error("浏览器返回了整个系统的声音。请改选标签页音频，或用 Windows 客户端按进程共享。");
+  if (tracks.length !== 1 || (surface === "window" && tracks[0].label !== "Application Audio"))
+    throw Error("无法确认音轨仅来自所选音源。请改选标签页音频，或用 Windows 客户端按进程共享。");
+  return surface === "window" ? "应用窗口" : "浏览器标签页";
+}
 $("stage").onclick = async () => {
   if (room?.hosting) return leave();
   requesting = true;
@@ -250,21 +267,21 @@ $("stage").onclick = async () => {
   try {
     const [rate, bits] = $("quality").value.split("/").map(Number);
     if (!navigator.mediaDevices?.getDisplayMedia)
-      throw Error("请通过 HTTPS 在桌面 Chrome 或 Edge 中共享标签页");
+      throw Error("请通过 HTTPS 在桌面 Chrome 或 Edge 中共享音频。");
     const chosen = await navigator.mediaDevices.getDisplayMedia({
-      video: { displaySurface: "browser" },
+      video: { displaySurface: "window" },
       audio: true,
+      windowAudio: "window",
       systemAudio: "exclude",
+      monitorTypeSurfaces: "exclude",
+      surfaceSwitching: "exclude",
     });
-    if (
-      version !== epoch ||
-      chosen.getVideoTracks()[0]?.getSettings().displaySurface !== "browser" ||
-      !chosen.getAudioTracks().length
-    ) {
+    if (version !== epoch) {
       chosen.getTracks().forEach((t) => t.stop());
-      throw Error("请选择浏览器标签页并勾选共享音频");
+      return;
     }
     input = chosen;
+    const source = sharedAudioSource(chosen);
     for (const track of chosen.getTracks())
       track.onended = () => {
         if (input === chosen) leave();
@@ -272,7 +289,7 @@ $("stage").onclick = async () => {
     captureContext = new AudioContext({ sampleRate: rate });
     await captureContext.resume();
     const state = await api("stage/request", {
-      source: "浏览器标签页",
+      source,
       rate: captureContext.sampleRate,
       bits, codec: $("codec").value === "pcm" ? "pcm" : "opus",
       bitrate: ({opus64:64000, opus256:256000})[$("codec").value] || 128000,
@@ -281,8 +298,9 @@ $("stage").onclick = async () => {
     requesting = false;
     render(state);
   } catch (e) {
+    if (version !== epoch) return;
     clearInput();
-    note(e.message);
+    note(e.name === "NotAllowedError" ? "未获得共享权限。要上台，请重新选择音源并允许共享。" : e.message);
   } finally {
     requesting = false;
     if (room) render(room);

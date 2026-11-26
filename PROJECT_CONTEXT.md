@@ -1,6 +1,6 @@
 # Audimate 项目上下文
 
-最近更新于 2026-11-27。Windows 客户端和网页已接入同一套注册登录、房间和音频服务。两端均可入房收听、申请主持、审批、交接及下台。桌面端按进程采音，网页端分享浏览器标签页，两端均可选择音质。当前测试机提供公网 IP HTTPS 入口。[桌面端](client/README.md) · [服务端与网页端](server/README.md) · [项目仓库](https://github.com/LQWWHEN/Audimate.git)
+最近更新于 2026-11-27。Windows 客户端和网页已接入同一套注册登录、房间和音频服务。两端均可入房收听、申请主持、审批、交接及下台。桌面端按进程采音，网页端可分享浏览器标签页，或在支持应用音频采集的环境中分享程序窗口。两端均可选择音质。当前测试机提供公网 IP HTTPS 入口。[桌面端](client/README.md) · [服务端与网页端](server/README.md) · [项目仓库](https://github.com/LQWWHEN/Audimate.git)
 
 ## 产品目标与已确认需求
 
@@ -13,7 +13,7 @@ Audimate 用于 20 人以下的 PC 实时音乐共享。主持人从自己的电
 
 ## 当前初版
 
-一间房最多 19 个会话，主持与听众共享同一账号体系。桌面保留 Tk 和 C++ 进程隔离采音，网页使用标签页音源。业务服务负责发布授权和换台，LiveKit 负责实时 Opus 音轨。原型归档标签为 `prototype-pre-livekit-20261127`。
+一间房最多 19 个会话，主持与听众共享同一账号体系。桌面保留 Tk 和 C++ 进程隔离采音，网页通过浏览器选择音源。业务服务负责发布授权和换台，LiveKit 负责实时 Opus 音轨。原型归档标签为 `prototype-pre-livekit-20261127`。
 
 听众可独立选择优先无损或节省流量。目标播放位置距实时约 600 ms。预计延迟超过 1 秒时提醒，手动模式继续播放。自动校准默认每 5 秒检查，运维可配置档位。可用媒体时序显示已经到达服务端历史上限时，客户端强制重新对齐。WebRTC 指标的可用性取决于 SDK，运维页分别标注估计和实测口径。不同听众无需锁步播放。
 
@@ -21,7 +21,7 @@ Audimate 用于 20 人以下的 PC 实时音乐共享。主持人从自己的电
 
 **桌面播放器。** 主持人选择应用后，Windows 采集模块用 WASAPI Application Loopback 的 `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` 模式捕获目标 PID 及其子进程。若播放器委托进程树之外的服务发声，或内容受保护，可能只能得到静音。界面应显示所选来源和实时电平；捕获失败时提示重新选源。默认输出设备的全局回环会混入其他应用声音，不能作为自动回退方式。微软样例给出的最低系统构建号为 20348，首版建议以 Windows 11 实机验证。[微软按进程采音样例](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/) · [回环录音与受保护内容](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording)
 
-**网页播放器。** 网页模式用 Chrome 的 `getDisplayMedia()`，由主持人选择音乐标签页并勾选共享音频。发布前核对选中来源为标签页且包含音轨，仅向房间发布音轨。选择浏览器进程树可能同时捕获多个标签页；标签页内网页自身的广告或提示音仍在所选音源范围内。[Chrome 共享来源控制](https://developer.chrome.com/docs/web-platform/screen-sharing-controls)
+**网页采音。** 主持人通过 `getDisplayMedia()` 选择应用窗口或音乐标签页，在选择器中勾选对应音频。网页请求 `windowAudio: "window"`，发布前校验音轨。对于窗口，Chromium 可能回退到系统混音，因此只接受其明确标记为 `Application Audio` 的音轨。窗口模式采集所属应用的声音；同一浏览器里要隔离某个音乐网页时，应选具体标签页。只上传音频。[Chromium 音轨标记实现](https://chromium.googlesource.com/chromium/src/+/refs/tags/158.0.8127.37/chrome/browser/media/webrtc/desktop_capture_devices_util.cc)
 
 **媒体路径。** 主持上传一条 LiveKit Opus 音轨或一份所选格式的 PCM。Opus 由 SFU 分发，媒体桥接保留该轮解码历史。PCM 保留原始采样，第一位请求 Opus 的听众触发共享编码。网页和桌面均可持续等候新主持，网络中断可走缓冲读取。缓存按音频时长和包龄双重裁剪，默认 5 秒，每轮主持隔离。
 
@@ -34,6 +34,8 @@ Audimate 用于 20 人以下的 PC 实时音乐共享。主持人从自己的电
 运维后台位于同一服务的 `/ops/`，使用独立的运维登录。后台可查看房间在线与拉流会话、各端流量、音源状态、缓冲和最近异常。2026-11-27 已用独立主持、听众、运维三个会话通过公网验收，上传与返回的音频各 115,200 字节，后台增量与实测一致。速率覆盖最近 10 秒，趋势最多 10 分钟，工作进程重启后统计重新开始。[运维监控与权限管理](server/README.md#运维监控)
 
 **LiveKit 初版验收（2026-11-27）。** 两个独立 Chrome 会话在公网验证了 Opus 实际音频、无损源共享转码、接收偏好切换、空席等待和换主持，旧令牌在下台后返回 403。Windows 桌面用指定进程播放右声道信号，经单条 LiveKit 轨道送入浏览器，核对左右声道并验证桌面播放设备。针对原生 SDK 遗漏立体声标记，固定版本 SFU 对命名音乐轨道补齐协商。测试机用独立临时 systemd 服务实测重启、更换 PID、载入新缓存上限并手动开放。普通 Windows 10、满房负载、长时播放和物理端到端延迟仍待验证。
+
+**网页窗口采音验收（2026-11-27）。** Windows 开发机上的 Chrome 158 通过原生选择器选取播放器窗口，两个网页会话在公网测试站完成 LiveKit Opus 和 PCM 收听。两个独立进程同时播放 700 Hz 和 1800 Hz，听众 PCM 中的干扰频率幅度低于目标音的 2%，暂停目标后静音。另测了应用窗口到音乐标签页的主持交接。此项覆盖测试播放器，普通 Windows 10 与具体音乐播放器的兼容性仍待实机验证。
 
 ## GitHub 留档约定
 

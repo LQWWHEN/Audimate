@@ -81,9 +81,10 @@
             <option value="44100/16">CD · 44.1 kHz / 16-bit</option>
             <option value="96000/24">录音室 · 96 kHz / 24-bit</option>
           </select>
-          <button id="stage" class="primary" disabled>主持 · 共享标签页</button
+          <button id="stage" class="primary" disabled aria-describedby="shareHelp">主持 · 共享音频</button
           ><button id="cancel" class="quiet" hidden>取消申请</button>
         </div>
+        <p id="shareHelp">分享桌面播放器时，选择它的窗口并勾选共享应用音频。分享网页音乐时，选择正在播放的标签页并勾选共享音频。</p>
         <div id="requests"></div></section></div>
       </section>
       <p id="notice" role="status" aria-live="polite"></p>
