@@ -246,6 +246,7 @@ for (const button of byId("range").querySelectorAll("button")) {
   };
 }
 let previousConfig = "";
+let timingView;
 const ms = value => Number.isFinite(value) ? Math.round(value) + " ms" : "—";
 function renderControl(s) {
   const {maintenance,restarting,active,pending,audit} = s.service;
@@ -274,6 +275,12 @@ function renderControl(s) {
     return row;
   }));
   byId("noSamples").hidden=!!s.samples.length;
+  if (s.timing) {
+    timingView ??= import("/ops/timing-dev.js");
+    timingView.then(view => { if (latest === s) view.render(s); }).catch(() => { timingView = null; });
+  } else {
+    byId("devTiming")?.remove();
+  }
 }
 async function manage(action,data={}) {
   try {render(await api("service/"+action,data)); byId("opResult").textContent="操作已完成";}

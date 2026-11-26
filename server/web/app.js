@@ -107,7 +107,9 @@ function refreshPlayback(force=false) {
   $("actual").textContent = transport === "rtc" ? "LiveKit · Opus 立体声" : host.codec === "opus" ? "Opus 解码缓存" : "无损 PCM";
   (transport === "rtc" ? task.runRTC() : task.runPCM()).catch(e => {
     if (task.closed || playback!==task) return;
-    diagnostics(host,"disconnect",transport);
+    const failure = task.pendingTiming || task.rtc?.failure;
+    diagnostics(host,"disconnect",transport,failure && detailedTiming()
+      ? {detail:{phase:failure.phase,http_status:failure.http_status,elapsed_ms:performance.now()-failure.start}} : {});
     if (transport === "rtc") {
       fallbackStream = host.stream;
       note("已改从服务器缓存收听。原因：" + e.message);
@@ -231,19 +233,21 @@ function render(state) {
     publish(h.stream, h.bits).catch((e) => {
       if (room?.host?.stream !== h.stream || !room.hosting || !input) return;
       note(e.message);
-      diagnostics(h,"error","rtc");
-      leave();
+      const failure = hostRTC?.failure;
+      diagnostics(h,"error",h.codec === "opus" ? "rtc" : "pcm",failure && detailedTiming()
+        ? {detail:{phase:failure.phase,elapsed_ms:performance.now()-failure.start}} : {});
+      leave(room,"upload");
     });
   }
 }
-async function leave(state = room) {
+async function leave(state = room, reason) {
   if (leaving || !state) return;
   const version = epoch, stream = state.host?.stream || "";
   leaving = true;
   const released = clearInput();
   if (room) render(room);
   try {
-    const updated = await api("stage/leave", { stream });
+    const updated = await api("stage/leave", { stream, ...(reason && detailedTiming() ? {reason} : {}) });
     if (version === epoch) room = updated;
   } catch (e) {
     if (version === epoch) note(e.message);
@@ -359,14 +363,20 @@ async function publish(stream, bits) {
     const destination=ctx.createMediaStreamDestination();
     ctx.createMediaStreamSource(new MediaStream(media.getAudioTracks())).connect(destination);
     const track = new LivekitClient.LocalAudioTrack(destination.stream.getAudioTracks()[0], undefined, true);
+    const publishStart = performance.now();
+    if (detailedTiming()) session.failure = {phase:"publish_track",start:publishStart};
     await session.room.localParticipant.publishTrack(track, {name:"music", source:LivekitClient.Track.Source.Microphone,
       audioPreset:{maxBitrate:host.bitrate}, forceStereo:true, dtx:false, red:true});
+    if (session.timing) session.timing.publish_track_ms = performance.now()-publishStart;
+    session.failure = null;
     if (session.closed) { track.stop(); return; }
     session.timer = setInterval(async () => {
       if (session.closed) return;
       try {
         const metrics = await rtcMetrics(track);
+        if (session.timing && detailedTiming()) metrics.detail = {...metrics.detail,...session.timing};
         diagnostics(host, "publish", "rtc", metrics);
+        session.timing = null;
         if (metrics.rtt_ms > 1000) note("主持上行往返延迟偏高，请检查网络或手动调整音质。");
       } catch {}
     }, 2000);
@@ -384,22 +394,34 @@ async function publish(stream, bits) {
     .connect(node);
   node.connect(mute).connect(ctx.destination);
   const pending = [];
-  let busy=false, dropped=0, reported=0;
+  let busy=false, dropped=0, reported=0, packetId=0;
   const host=room.host;
   async function drain() {
     busy=true;
     while (pending.length && generation===stageGeneration) {
-      const {data,captured}=pending.shift(), start=performance.now();
+      const {data,captured,queued,detail}=pending.shift(), start=performance.now();
+      const trace = detailedTiming() && detail;
+      if (trace) trace.queue_ms = start-queued;
       try {
-        const r=await fetch("/api/audio?stream="+stream+(captured == null ? "" : "&captured="+Math.round(captured)),
+        const traceQuery = trace ? "&packet="+trace.source_seq+(clockOffset==null ? "" : "&sent="+Math.round(Date.now()+clockOffset)) : "";
+        const r=await fetch("/api/audio?stream="+stream+(captured == null ? "" : "&captured="+Math.round(captured))+traceQuery,
           {method:"POST",headers:{"Content-Type":"application/octet-stream"},body:data});
+        if (trace) {trace.fetch_headers_ms=performance.now()-start; trace.http_status=r.status;}
         if (!r.ok) throw Error("音频上传已结束");
-        if (performance.now()-reported>2000) {
-          diagnostics(host,dropped ? "overload":"publish","pcm",{upload_ms:performance.now()-start,discarded:dropped});
+        if (trace) {
+          const bodyStart=performance.now(), ack=await r.json();
+          trace.body_ms=performance.now()-bodyStart;
+          if (Number.isSafeInteger(ack.server_seq)) trace.server_seq=ack.server_seq;
+        }
+        const upload_ms=performance.now()-start;
+        if (trace ? trace.source_seq%10===1 || dropped || upload_ms>200 : performance.now()-reported>2000) {
+          diagnostics(host,dropped ? "overload":"publish","pcm",{upload_ms,discarded:dropped,...(trace ? {detail:trace} : {})});
           reported=performance.now(); dropped=0;
         }
       } catch(e) {
-        if (generation===stageGeneration) {note(e.message); await leave();}
+        if (trace && generation===stageGeneration)
+          diagnostics(host,"error","pcm",{detail:{...trace,phase:trace.http_status >= 400 ? "headers" : trace.http_status ? "body" : "upload",elapsed_ms:performance.now()-start}});
+        if (generation===stageGeneration) {note(e.message); await leave(room,"upload");}
         break;
       }
     }
@@ -409,7 +431,13 @@ async function publish(stream, bits) {
     if (generation!==stageGeneration) return;
     if (pending.length>=2) {pending.shift(); dropped++; note("上传赶不上采集，已跳过旧音频。可手动降低共享音质。");}
     const captured = clockOffset==null ? null : Date.now()+clockOffset+(event.data.startTime-ctx.currentTime)*1000;
-    pending.push({data:event.data.pcm,captured});
+    const data = event.data.pcm, queued = performance.now();
+    packetId++;
+    const packMs = data.byteLength * 1000 / (2*(bits/8)*ctx.sampleRate);
+    const detail = detailedTiming() ? {source_seq:packetId, packet_bytes:data.byteLength, queue_depth:pending.length,
+      pack_ms:packMs, handoff_ms:Math.max(0,(ctx.currentTime-event.data.startTime)*1000-packMs),
+      source_clock_error_ms:clockError} : null;
+    pending.push({data,captured,queued,detail});
     if (!busy) drain();
   };
 }
@@ -425,7 +453,7 @@ $("listen").onclick = async () => {
 $("sync").onclick=()=>{
   if (!playback) return;
   if (playback.lag != null && playback.lag <= 850 && !fallbackStream) {note("已接近实时位置"); return;}
-  diagnostics(playback.host,"sync",playback.transport);
+  diagnostics(playback.host,"sync",playback.transport,detailedTiming() ? {detail:{phase:"manual"}} : {});
   fallbackStream=""; refreshPlayback(true); note("正在同步到当前音源");
 };
 $("auto").onchange=()=>{prefs.auto=$("auto").checked; savePrefs();};

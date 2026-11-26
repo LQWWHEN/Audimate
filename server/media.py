@@ -29,12 +29,12 @@ class History:
                                self.end_frame - self.blocks[0][2] > rate * self.seconds or len(self.blocks) > 3000):
             self.blocks.popleft()
 
-    def append(self, pcm, rate, width, captured=None):
+    def append(self, pcm, rate, width, captured=None, trace=None):
         now = time.monotonic()
         start = self.end_frame
         self.end_frame += len(pcm) // (2 * width)
         self.sequence += 1
-        self.blocks.append((self.sequence, pcm, start, self.end_frame, now, captured))
+        self.blocks.append((self.sequence, pcm, start, self.end_frame, now, captured, trace))
         self.prune(now, rate)
 
     def read(self, after, rate, align):
@@ -173,14 +173,23 @@ class Media:
         token = self.token(stream, "bridge", publish=not record, subscribe=record)
         async def consume(track):
             buffer = bytearray()
+            start = time.monotonic()
             async for event in rtc.AudioStream.from_track(track=track, sample_rate=48000, num_channels=2):
+                if not buffer:
+                    start = time.monotonic()
                 buffer.extend(event.frame.data.cast("B"))
                 if len(buffer) >= 38400:
                     with room.lock:
                         if not room.host or room.host["stream"] != stream:
                             return
-                        room.history.append(bytes(buffer), 48000, 2)
+                        trace = None
+                        if room.monitor.development and room.monitor.level == "debug":
+                            trace = dict(pack_ms=(time.monotonic()-start)*1000,packet_bytes=len(buffer))
+                        room.history.append(bytes(buffer), 48000, 2, trace=trace)
                         room.last_audio = time.monotonic()
+                        if trace:
+                            trace["server_seq"] = room.history.sequence
+                            room.monitor.service_sample(stream, "opus_to_pcm", "rtc", trace)
                     buffer.clear()
 
         tasks = []
@@ -214,8 +223,20 @@ class Media:
                     await asyncio.sleep(0.02)
                     continue
                 after = block[0]
-                for frame in converter.frames(block[1]):
+                start = time.monotonic()
+                frames = converter.frames(block[1])
+                converted = time.monotonic()
+                for frame in frames:
                     await source.capture_frame(frame)
+                if room.monitor.development and room.monitor.level == "debug":
+                    finished = time.monotonic()
+                    with room.lock:
+                        if room.host and room.host["stream"] == stream:
+                            metrics = dict(server_seq=block[0], residence_ms=(start-block[4])*1000,
+                                           convert_ms=(converted-start)*1000,sdk_push_ms=(finished-converted)*1000)
+                            if block[6] and "source_seq" in block[6]:
+                                metrics["source_seq"] = block[6]["source_seq"]
+                            room.monitor.service_sample(stream, "pcm_to_opus", "rtc", metrics)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

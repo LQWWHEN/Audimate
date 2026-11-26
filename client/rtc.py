@@ -4,6 +4,7 @@ import queue
 import sys
 import threading
 import time
+from .network import timed
 
 
 class RTCWorker(threading.Thread):
@@ -16,6 +17,7 @@ class RTCWorker(threading.Thread):
         self.dropped = 0
         self.subscribed = False
         self.lag = None
+        self.timing = {}
 
     def add(self, block):
         if self.packets.full():
@@ -25,7 +27,8 @@ class RTCWorker(threading.Thread):
                 self.notice = "上传缓冲已满，已丢弃旧采集帧，可手动降低音质"
             except queue.Empty:
                 pass
-        self.packets.put_nowait(bytes(block.pcm))
+        self.packets.put_nowait((bytes(block.pcm), time.monotonic() if self.api.timing else None,
+                                 getattr(block, "capture_read_ms", None)))
 
     def run(self):
         try:
@@ -33,6 +36,8 @@ class RTCWorker(threading.Thread):
         except Exception as exc:
             if not self.cancel.is_set():
                 self.error = "LiveKit · " + str(exc)
+                if self.api.timing:
+                    self.api.report(self.host["stream"], "error", "rtc", {"detail":{"phase":"sdk", **self.timing}})
 
     async def connect(self):
         try:
@@ -44,10 +49,13 @@ class RTCWorker(threading.Thread):
             ) from exc
         from server.rtc_audio import FrameConverter, publish_source
         session = rtc.Room()
-        await asyncio.to_thread(self.api.calibrate)
-        grant = await asyncio.to_thread(self.api.request, "media", {
-            "stream": self.host["stream"], "role": "publish" if self.publish else "listen",
-            "clock_offset_ms": self.api.offset, "clock_error_ms": self.api.clock_error})
+        timing = self.timing if self.api.timing else None
+        with timed(timing, "clock", "clock_sync_ms"):
+            await asyncio.to_thread(self.api.calibrate)
+        with timed(timing, "grant", "grant_ms"):
+            grant = await asyncio.to_thread(self.api.request, "media", {
+                "stream": self.host["stream"], "role": "publish" if self.publish else "listen",
+                "clock_offset_ms": self.api.offset, "clock_error_ms": self.api.clock_error})
         tracks = asyncio.Queue()
         @session.on("track_subscribed")
         def subscribed(track, publication, participant):
@@ -61,36 +69,51 @@ class RTCWorker(threading.Thread):
             try:
                 with Output(48000, 16) as output:
                     async for event in stream:
-                        await asyncio.to_thread(output.write, bytes(event.frame.data.cast("B")))
+                        with timed(self.timing if self.api.timing else None, "output", "device_ms"):
+                            await asyncio.to_thread(output.write, bytes(event.frame.data.cast("B")))
             finally:
                 await stream.aclose()
 
         player = None
         try:
-            await session.connect(grant["url"], grant["token"], options=rtc.RoomOptions(auto_subscribe=not self.publish))
+            connect_start = time.monotonic()
+            with timed(timing, "connect", "rtc_connect_ms"):
+                await session.connect(grant["url"], grant["token"], options=rtc.RoomOptions(auto_subscribe=not self.publish))
             reported = 0
             started = time.monotonic()
             track = None
             if self.publish:
                 source = rtc.AudioSource(48000, 2, queue_size_ms=200)
                 converter = FrameConverter(self.host["rate"], self.host["bits"])
-                track = await publish_source(session, source, self.host["bitrate"])
+                with timed(timing, "publish_track", "publish_track_ms"):
+                    track = await publish_source(session, source, self.host["bitrate"])
             previous = (0, 0)
+            previous_send = (0, 0)
             while not self.cancel.is_set():
                 if not session.isconnected():
                     raise OSError("媒体连接已中断")
                 if self.publish:
                     try:
-                        pcm = self.packets.get_nowait()
+                        pcm, queued, capture_ms = self.packets.get_nowait()
                     except queue.Empty:
                         await asyncio.sleep(.006)
                         continue
-                    for frame in converter.frames(pcm):
-                        await source.capture_frame(frame)
+                    frame_timing = self.timing if self.api.timing else None
+                    if frame_timing is not None and queued is not None:
+                        frame_timing.update(queue_ms=(time.monotonic()-queued)*1000, queue_depth=self.packets.qsize())
+                        if capture_ms is not None:
+                            frame_timing["capture_read_ms"] = capture_ms
+                    with timed(frame_timing, "sdk", "convert_ms"):
+                        frames = converter.frames(pcm)
+                    with timed(frame_timing, "sdk", "sdk_push_ms"):
+                        for frame in frames:
+                            await source.capture_frame(frame)
                 else:
                     if not tracks.empty():
                         track = tracks.get_nowait()
                         self.subscribed = True
+                        if self.api.timing:
+                            self.timing["subscribe_ms"] = (time.monotonic()-connect_start)*1000
                         if player:
                             player.cancel()
                         player = asyncio.create_task(listen(track))
@@ -102,9 +125,13 @@ class RTCWorker(threading.Thread):
                     await asyncio.sleep(.05)
                 if track and time.monotonic()-reported >= 2:
                     metrics = {"discarded": self.dropped}
+                    if self.api.timing:
+                        metrics["detail"] = self.timing.copy()
                     for stat in await track.get_stats():
                         if stat.HasField("inbound_rtp"):
                             row = stat.inbound_rtp.inbound
+                            if "detail" in metrics and any(f.name == "concealed_samples" for f, _ in row.ListFields()):
+                                metrics["detail"]["concealed_samples"] = row.concealed_samples
                             metrics["bytes"] = row.bytes_received
                             stamp = row.estimated_playout_timestamp
                             if stamp > 3e12:
@@ -125,10 +152,19 @@ class RTCWorker(threading.Thread):
                             metrics["lost"] = stat.inbound_rtp.received.packets_lost
                         if stat.HasField("outbound_rtp"):
                             metrics["bytes"] = stat.outbound_rtp.sent.bytes_sent
+                            outbound = stat.outbound_rtp.outbound
+                            if "detail" in metrics and any(f.name == "total_packet_send_delay" for f, _ in outbound.ListFields()):
+                                sent = stat.outbound_rtp.sent.packets_sent
+                                delay = outbound.total_packet_send_delay
+                                if sent > previous_send[1] and delay >= previous_send[0]:
+                                    metrics["detail"]["rtp_send_queue_ms"] = 1000*(delay-previous_send[0])/(sent-previous_send[1])
+                                previous_send = delay, sent
                         if stat.HasField("remote_inbound_rtp"):
                             metrics["rtt_ms"] = stat.remote_inbound_rtp.remote_inbound.round_trip_time * 1000
                     await asyncio.to_thread(self.api.report, self.host["stream"],
                                             "overload" if self.dropped else "publish" if self.publish else "play", "rtc", metrics)
+                    for key in ("grant_ms","clock_sync_ms","rtc_connect_ms","subscribe_ms","publish_track_ms"):
+                        self.timing.pop(key, None)
                     self.dropped = 0
                     reported = time.monotonic()
         finally:

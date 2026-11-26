@@ -63,14 +63,21 @@ async function run() {
     const pcm = Buffer.alloc(38400);
     for (let i = 0; i < pcm.length / 4; i++) pcm.writeInt16LE(Math.round(900 * Math.sin(i / 12)), 4 * i + 2);
     for (let i = 0; i < 3; i++) {
-      await post(host, media, pcm);
+      await post(host, media+(service ? "&packet="+(i+1) : ""), pcm);
       const data = await listener.get(url + media + "&after=" + i);
       assert.equal(data.status(), 200);
       assert.ok(pcm.equals(await data.body()));
     }
     if (service) {
-      await post(listener,"/api/diagnostics",{stream,event:"play",transport:"pcm",playout_ms:642.5,clock_error_ms:8.2,buffer_ms:200});
+      await post(listener,"/api/diagnostics",{stream,event:"play",transport:"pcm",playout_ms:642.5,clock_error_ms:8.2,buffer_ms:200,
+        detail:{source_seq:1,server_seq:1,decode_ms:4.25}});
       await page.waitForFunction(()=>document.querySelector("#p95").textContent.includes("643 ms"));
+      await page.waitForFunction(()=>document.querySelector("#devTiming .stageRows")?.textContent.includes("PCM 解码"));
+      await page.fill("#devTiming input", "1");
+      assert.ok((await page.locator(".packetRows").textContent()).includes("PCM 解码"));
+      await page.fill("#devTiming input", "999");
+      await page.waitForSelector(".emptyTrace:visible");
+      await page.fill("#devTiming input", "");
     }
     const current = await snapshot();
     assert.equal(current.members.length, 2);

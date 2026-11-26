@@ -94,6 +94,7 @@ async function run() {
           "0",
           "--db",
           path.join(dir, "accounts.db"),
+          ...(process.argv.includes("--release") ? ["--release"] : []),
         ],
         { windowsHide: true },
       );
@@ -122,8 +123,12 @@ async function run() {
       viewport: { width: 390, height: 760 },
     });
     const errors = [];
+    const samples = [];
     for (const page of [host, listener])
       page.on("pageerror", (e) => errors.push(e.message));
+    for (const page of [host, listener]) page.on("request", request => {
+      if (new URL(request.url()).pathname === "/api/diagnostics") samples.push(request.postDataJSON());
+    });
     const suffix = randomBytes(6).toString("hex");
     const password = randomBytes(24).toString("hex");
     await account(host, url, "webQA_" + suffix, password, true);
@@ -295,6 +300,22 @@ async function run() {
     } else {
       await listener.click("#listen");
       await listener.waitForFunction(() => window.samplesReceived > 0, null, {timeout:15000});
+      if (service) {
+        const development = !process.argv.includes("--release");
+        const flag = await host.evaluate(() => room.config.dev_timing === true);
+        assert.equal(flag, development);
+        const timeout = Date.now()+8000;
+        while (!samples.some(s=>s.event==="publish") || !samples.some(s=>s.event==="play")) {
+          assert.ok(Date.now()<timeout,"缺少浏览器主持或播放诊断样本");
+          await new Promise(resolve=>setTimeout(resolve,100));
+        }
+        if (development) {
+          assert.ok(samples.some(s=>s.event==="publish" && s.detail?.queue_ms>=0 && s.detail.server_seq>0));
+          assert.ok(samples.some(s=>s.event==="play" && s.detail?.decode_ms>=0 && s.detail.source_seq>0));
+        } else {
+          assert.ok(samples.every(s=>!("detail" in s)));
+        }
+      }
     }
     assert.match(await listener.textContent("#hostInfo"), /96 kHz · 24-bit/);
     assert.equal(await listener.textContent("#source"), "应用窗口");

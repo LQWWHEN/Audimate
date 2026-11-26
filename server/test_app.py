@@ -26,7 +26,7 @@ class Integration(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.db = Path(self.tmp.name) / "accounts.sqlite3"
-        self.app = App(self.db)
+        self.app = App(self.db, development=getattr(self, "development", False))
         server = make_server("127.0.0.1", 0, self.app, ThreadedServer, Quiet)
         self.addCleanup(server.server_close)
         thread = threading.Thread(target=server.serve_forever, daemon=True)

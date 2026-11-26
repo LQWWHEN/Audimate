@@ -85,6 +85,25 @@ python3 ops_admin.py --db /var/lib/audimate/accounts.sqlite3 revoke existing-use
 
 诊断级别可随时切换为完整、仅异常或关闭。SQLite 中保留最近 10 分钟内最多 600 条客户端样本，工作进程重启后可继续排查。后台页面显示最近 60 条。PCM 客户端使用三次服务器对时中 RTT 最短的一次，估计从采集块起点到提交播放的时间。RTCP 时差估计仅在有发送时钟映射时给出。网络 RTT、抖动与接收缓冲单独显示，缺测显示空值。声卡、扬声器的实际出声时间需要外部回录。SFU 通过回环 Prometheus 端点读取 RTP 入出字节（包含桥接），PCM HTTP 流量单独计量。关闭诊断保留基础计数和运维审计。
 
+### 开发版链路计时
+
+本地 `python -m server.dev --db build/audimate-local.sqlite3` 和测试站的 Gunicorn 工厂 `app:create_dev_app()` 提供链路计时。网页随所连接服务选择版本。Windows 使用 `.\client\start-dev.cmd` 接入开发服务。正式部署使用仓库自带的 systemd 单元及 `app:create_app()`，桌面使用 `.\client\start.cmd`。日志级别只控制当前版本的输出范围。
+
+测试站可在维护期间把 `deploy/development-timing.conf` 安装到 `/etc/systemd/system/audimate.service.d/development-timing.conf`，执行 `systemctl daemon-reload` 和 `systemctl restart audimate` 后生效。正式站使用基础单元。
+
+在开发服务登录 `/ops/`，进入「传输时间线 → 开发版链路计时」。展开耗时分布可查看当前主持轮次的样本数、P50、P95 和最大值。空席时显示最近有样本的一轮。输入源包号或缓存包号可对照主持、入库、收听三处的记录。源包号在主持端组包时分配，缓存包号由服务端实际入库后分配，两者可能不同。
+
+| 路径 | 记录内容 |
+| --- | --- |
+| PCM 主持 | Windows 末帧采集读取、组包跨度、待发队列、连接复用、建连（含 TLS）、写请求、等响应头、读响应体及上传总耗时。网页记录音频块时长、音频线程交付、排队、Fetch 发起至收头及读响应体。 |
+| PCM 服务 | 从应用收到请求至入库、读取请求体、等待房间锁、追加缓存、包在缓存中的驻留、处理拉取请求。Nginx 和网络套接字在 WSGI 计时边界之外。 |
+| PCM 收听 | 拉取、连续空读等待、网页解码、待排播时长、错过播放时刻的时长或桌面写播放设备耗时。跨端的采集至入库、上传开始至入库、响应就绪至收齐和采集至预计播放均依赖对时。 |
+| LiveKit | 凭据、加入房间、发布或订阅、可见的格式转换与 SDK 交帧、设备写入，以及 SDK 提供的 RTP 排队、RTT、抖动、掩蔽样本和接收缓冲。跨格式桥接按缓存包号关联。SFU 内部转发和终端扬声器出声时间需要独立测量。 |
+
+排查桌面 `timed out` 时，先看 `error` 的「阶段」「超时」「当前阶段耗时」。例如「等响应头」表示客户端已经写完请求。再用源包号查入库；即使该包的确认丢失，服务端也会尝试在最近 30 秒、最多 128 个包的接收记录中补上缓存包号。查不到入库记录时，仍可能是采样、保留期限或网络中断造成。客户端能在下台后短时间内补报本轮故障。
+
+完整模式按约每 10 个 PCM 包取一个常规样本，慢上传、欠载、同步与错误另外限频上报。仅异常模式保留故障，关闭模式停止传输样本。开发明细在内存中即时可见，每约 2 秒异步批量写入独立的 SQLite 表 `dev_transport_log`，保留最近 10 分钟、最多 600 条。拥塞及异常退出可能造成样本缺失。分位数以实际保留的样本计算。阶段存在重叠，例如等响应头可以包含服务端入库时间，不能把各列或各自的 P95 相加作为端到端延迟。
+
 ## 接口与传输
 
 浏览器 SDK 2.25.0 由同源静态资源提供，授权见 `web/vendor/livekit-LICENSE.txt`。服务器使用 LiveKit v1.13.11。原生 SDK 用轨道名 `audimate-stereo` 声明双声道。构建脚本对该轨道补齐上游 SFU 的立体声标记，确保只上传一条音轨。每轮主持拥有独立媒体房间。业务端签发有效期 45 秒的入房 JWT。Nginx 将公网信令转到当前会话授权检查，SFU 管理 API 和指标仅监听回环地址。
@@ -110,12 +129,15 @@ python3 ops_admin.py --db /var/lib/audimate/accounts.sqlite3 revoke existing-use
 在仓库根目录运行。桌面用例需要 Windows、Tk 和已构建的 x64 采音 DLL。浏览器用例需要 Node.js、Playwright 和 Chromium，可用 `CHROME_BIN` 和 `AUDIMATE_PYTHON` 指定可执行文件。
 
 ```powershell
-python -m unittest server.test_app server.test_runtime client.test_online client.test_client -v
+python -m unittest server.test_app server.test_runtime server.test_timing client.test_online client.test_client -v
 node server/test_browser.cjs
+node server/test_browser.cjs --release
 node server/test_ops_browser.cjs
 # 指定已配置媒体的空闲测试服务 AUDIMATE_TEST_URL，或指定本机 SFU 可执行文件 LIVEKIT_BIN
 node server/test_browser.cjs --livekit
 ```
+
+在已配置 LiveKit 的测试机加载测试 SFU 环境后，可运行 `python -m server.test_bridge_timing`。该用例创建两个临时媒体房间，验证双向桥接的实际音频和分段计时，独立于业务房间的维护状态。
 
 网页用例默认用合成音轨模拟浏览器来源选择，实际执行上传、解码和播放。Windows 开发机可运行 `node server/test_browser.cjs --native-window`，需要桌面会话、支持应用音频的 Chrome、Python Tk 和可用的音频输出。目标窗口在左声道播放 700 Hz、右声道播放 14 kHz，另一个进程播放 1800 Hz 干扰音。用例在 PCM 听众端检查左右电平、串音、干扰和目标暂停后的静音，再切换到标签页主持。加上 `--livekit` 还会在 Opus 解码后检查声道分离和电平。
 

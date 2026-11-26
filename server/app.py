@@ -72,14 +72,16 @@ def fields(env):
 
 
 class Room:
-    def __init__(self):
+    def __init__(self, development=False):
         self.lock = threading.Lock()
         self.members = {}
         self.pending = {}
         self.host = None
         self.media = Media()
         self.history = History(5)
-        self.monitor = Monitor()
+        self.monitor = Monitor(development)
+        self.flush_service = None
+        self.log_epoch = 0
         self.stage_since = self.last_audio = None
         self.watching = False
 
@@ -88,10 +90,21 @@ class Room:
             time.sleep(2)
             with self.lock:
                 self.expire(time.monotonic())
-                if not self.host:
+                pending = list(self.monitor.service_pending)
+                self.monitor.service_pending.clear()
+                epoch = self.log_epoch
+                if self.host:
+                    self.history.prune(time.monotonic(), 48000 if self.host["codec"]=="opus" else self.host["rate"])
+                elif not pending:
                     self.watching = False
                     return
-                self.history.prune(time.monotonic(), 48000 if self.host["codec"]=="opus" else self.host["rate"])
+            if pending and self.flush_service:
+                self.flush_service(pending, epoch)
+
+    def start_watcher(self):
+        if not self.watching:
+            self.watching = True
+            threading.Thread(target=self.watch, daemon=True).start()
 
     def leave(self, key, reason="退出"):
         member = self.members.pop(key, None)
@@ -106,6 +119,10 @@ class Room:
 
     def reset(self):
         if self.host:
+            member = self.members.get(self.host["key"])
+            if member and self.monitor.development:
+                member.ended_stream, member.ended_at = self.host["stream"], time.monotonic()
+                self.monitor.service_last.clear()
             self.media.stop()
             self.media.remove(self.host["stream"])
         self.host = None
@@ -134,9 +151,7 @@ class Room:
         self.reset()
         self.host = dict(choice, key=key, stream=secrets.token_hex(12), track=None)
         self.stage_since = time.monotonic()
-        if not self.watching:
-            self.watching = True
-            threading.Thread(target=self.watch, daemon=True).start()
+        self.start_watcher()
         if choice["codec"] == "opus":
             self.media.start_bridge(self.host, self)
         self.monitor.event("主持", f"{choice['name']} 上台 · {choice['rate']} Hz / {choice['bits']}-bit")
@@ -189,7 +204,9 @@ class Room:
         elif action == "leave":
             # A delayed stop from a former stream must not stop a new one.
             if self.host and self.host["key"] == key and self.host["stream"] == data.get("stream"):
-                self.monitor.event("主持", f"{name} 主动下台")
+                reasons = {"upload": "上传异常下台", "capture": "采集异常下台"}
+                reason = reasons.get(data.get("reason"), "主动下台") if self.monitor.development and isinstance(data.get("reason"), str) else "主动下台"
+                self.monitor.event("主持", f"{name} {reason}")
                 self.reset()
             if key in self.pending:
                 self.monitor.event("主持", f"{name} 取消申请")
@@ -210,9 +227,13 @@ class Room:
 
 
 class App:
-    def __init__(self, db):
+    def __init__(self, db, *, development=False):
         self.db = str(db)
-        self.room = Room()
+        self.room = Room(development)
+        self.development = development
+        self.log_table = "dev_transport_log" if development else "transport_log"
+        if development:
+            self.room.flush_service = self.flush_samples
         self.attempts = {}
         self.throttle = threading.Lock()
         with closing(sqlite3.connect(self.db)) as conn:
@@ -228,10 +249,31 @@ class App:
             self.control = Control(conn)
             self.room.history.seconds = self.control.active["history_s"]
             self.room.monitor.set_level(self.control.active["logging"])
-            conn.execute("DELETE FROM transport_log WHERE stamp < ?", (int(time.time())-600,))
-            rows = conn.execute("SELECT sample FROM transport_log ORDER BY id DESC LIMIT 600")
+            if development:
+                conn.execute("CREATE TABLE IF NOT EXISTS dev_transport_log (id INTEGER PRIMARY KEY, stamp INTEGER NOT NULL, sample TEXT NOT NULL)")
+            conn.execute(f"DELETE FROM {self.log_table} WHERE stamp < ?", (int(time.time())-600,))
+            rows = conn.execute(f"SELECT sample FROM {self.log_table} ORDER BY id DESC LIMIT 600")
             self.room.monitor.samples.extend(json.loads(row[0]) for row in rows)
             conn.commit()
+
+    def flush_samples(self, rows, epoch=None):
+        try:
+            with closing(sqlite3.connect(self.db, timeout=.1)) as conn, conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if epoch is not None and epoch != self.room.log_epoch:
+                    return
+                conn.executemany(f"INSERT INTO {self.log_table}(stamp,sample) VALUES(?,?)",
+                                 [(r["time"], json.dumps(r, ensure_ascii=False)) for r in rows])
+                conn.execute(f"DELETE FROM {self.log_table} WHERE stamp < ? OR id <= (SELECT max(id)-600 FROM {self.log_table})",
+                             (int(time.time())-600,))
+        except sqlite3.OperationalError:
+            if epoch is not None:
+                with self.room.lock:
+                    if epoch == self.room.log_epoch:
+                        pending = self.room.monitor.service_pending
+                        available = pending.maxlen - len(pending)
+                        if available:
+                            pending.extendleft(reversed(rows[-available:]))
 
     def auth(self, conn, action, data, addr, ops=False):
         name, password = data.get("name"), data.get("password")
@@ -271,10 +313,17 @@ class App:
 
     def dispatch(self, env):
         path, method = env["PATH_INFO"], env["REQUEST_METHOD"]
+        trace = self.development and self.room.monitor.level != "off" and path == "/api/audio"
+        if trace:
+            entered = time.monotonic()
         assets = {"/": "index.html", "/app.js": "app.js", "/app.css": "app.css", "/audio-worker.js": "audio-worker.js"}
         assets.update({"/vendor/livekit.js": "vendor/livekit-client-2.25.0.js", "/media.js": "media.js",
                        "/ops": "ops/index.html", "/ops/": "ops/index.html",
                        "/ops/style.css": "ops/style.css", "/ops/dashboard.js": "ops/dashboard.js"})
+        if self.development:
+            assets["/ops/timing-dev.js"] = "ops/timing-dev.js"
+        elif path == "/ops/timing-dev.js":
+            raise Problem(404, "资源不存在")
         if path in assets and method == "GET":
             file = WEB / assets[path]
             media_type = {".js": "text/javascript", ".css": "text/css", ".html": "text/html"}[file.suffix]
@@ -338,12 +387,18 @@ class App:
                         self.control.change(conn, user[0], path.rsplit("/", 1)[1], fields(env), self.room)
                     elif path != "/ops/api/overview" or method != "GET":
                         raise Problem(404, "接口不存在")
-                    conn.execute("DELETE FROM transport_log WHERE stamp < ?", (int(time.time())-600,))
+                    if path == "/ops/api/service/logging" and self.room.monitor.level != "debug":
+                        self.room.log_epoch += 1
+                        conn.execute(f"DELETE FROM {self.log_table}")
+                    conn.execute(f"DELETE FROM {self.log_table} WHERE stamp < ?", (int(time.time())-600,))
                     conn.commit()
                     if self.room.host:
                         history_rate = 48000 if self.room.host["codec"] == "opus" else self.room.host["rate"]
                         self.room.history.prune(now, history_rate)
                     snapshot = self.room.monitor.snapshot(self.room, now, CAPACITY, LEASE)
+                    if self.development:
+                        stream = self.room.host["stream"][:8] if self.room.host else next((r["session"] for r in snapshot["samples"]), "")
+                        snapshot["timing"] = self.room.monitor.stage_summary(stream)
                     snapshot["service"] = self.control.snapshot(conn)
                     snapshot["livekit"] = self.room.media.enabled
                     snapshot["sfu"] = self.room.media.statistics()
@@ -354,7 +409,11 @@ class App:
         if method == "POST" and path == "/api/audio":
             if env.get("CONTENT_TYPE") != "application/octet-stream":
                 raise Problem(415, "需要 PCM 数据")
+            if trace:
+                read_start = time.monotonic()
             packet = body(env, 768000)
+            if trace:
+                body_ms = (time.monotonic()-read_start)*1000
         elif method == "POST":
             data = fields(env)
         room = self.room
@@ -366,7 +425,12 @@ class App:
         clock_read = path == "/api/clock" and method == "GET"
         if not (room_read or stage_write or audio_request or media_request or clock_read):
             raise Problem(404, "接口不存在")
+        if trace:
+            before_lock = time.monotonic()
         with room.lock:
+            trace = trace and room.monitor.level != "off"
+            if trace:
+                lock_ms = (time.monotonic()-before_lock)*1000
             # The session may have been revoked while the upload body was being read.
             with closing(sqlite3.connect(self.db)) as check:
                 if self.control.maintenance or not check.execute("SELECT 1 FROM sessions WHERE key=? AND expires>?", (key, int(time.time()))).fetchone():
@@ -381,11 +445,11 @@ class App:
                 if path == "/api/diagnostics":
                     sample = room.monitor.record(room.members[key], data, host)
                     if sample:
-                        with closing(sqlite3.connect(self.db)) as logs, logs:
-                            logs.execute("INSERT INTO transport_log(stamp,sample) VALUES(?,?)",
-                                         (sample["time"], json.dumps(sample, ensure_ascii=False)))
-                            logs.execute("DELETE FROM transport_log WHERE stamp < ? OR id <= (SELECT max(id)-600 FROM transport_log)",
-                                         (int(time.time())-600,))
+                        if self.development:
+                            room.monitor.service_pending.append(sample)
+                            room.start_watcher()
+                        else:
+                            self.flush_samples([sample])
                     return 200, b"{}", []
                 if not room.media.enabled:
                     raise Problem(503, "LiveKit 尚未配置")
@@ -424,9 +488,29 @@ class App:
                         raise Problem(400, "采集时刻无效")
                     if captured is not None and (not math.isfinite(captured) or abs(time.time()*1000-captured) > 60000):
                         captured = None
-                    room.history.append(packet, host["rate"], align // 2, captured)
+                    detail = None
+                    if trace:
+                        detail = dict(packet_bytes=len(packet), server_body_ms=body_ms, lock_ms=lock_ms)
+                        packet_id = query.get("packet", [""])[0]
+                        if re.fullmatch(r"[0-9]{1,12}", packet_id):
+                            detail["source_seq"] = int(packet_id)
+                        store_start = time.monotonic()
+                    room.history.append(packet, host["rate"], align // 2, captured, detail)
                     room.last_audio = time.monotonic()
                     room.monitor.traffic(room.members[key], received=len(packet))
+                    if trace:
+                        detail.update(server_seq=room.history.sequence, store_ms=(room.last_audio-store_start)*1000,
+                                      ingest_ms=(room.last_audio-entered)*1000)
+                        if captured is not None:
+                            detail["capture_age_ms"] = time.time()*1000-captured
+                        sent = query.get("sent", [""])[0]
+                        if re.fullmatch(r"[0-9]{12,14}", sent):
+                            delay = time.time()*1000-int(sent)
+                            if 0 <= delay <= 60000:
+                                detail["uplink_est_ms"] = delay
+                        room.monitor.service_sample(host["stream"], "ingest", "pcm", detail)
+                        if "source_seq" in detail:
+                            return 200, encoded({"server_seq":room.history.sequence}), []
                     return 200, b"{}", []
                 try:
                     after = int(query.get("after", ["-1"])[0])
@@ -446,8 +530,14 @@ class App:
                            ("X-Reset", "1" if expired else "0")]
                 if item[5] is not None:
                     headers.append(("X-Captured-Ms", str(item[5])))
+                if trace and query.get("trace") == ["1"]:
+                    timing = dict(item[6] or {}, server_seq=item[0], packet_bytes=len(item[1]),
+                                  residence_ms=(time.monotonic()-item[4])*1000, serve_ms=(time.monotonic()-entered)*1000)
+                    headers.append(("X-Audimate-Timing", json.dumps({k:round(v,2) for k,v in timing.items()}, separators=(",",":"))))
+                    headers.append(("X-Audimate-Served-Ms", str(round(time.time()*1000))))
                 return 200, item[1], headers
-            return 200, encoded(dict(room.status(key), config=self.control.active)), []
+            config = dict(self.control.active, dev_timing=True) if self.development else self.control.active
+            return 200, encoded(dict(room.status(key), config=config)), []
 
     def __call__(self, env, start_response):
         from http.client import responses
@@ -479,3 +569,7 @@ class App:
 
 def create_app():
     return App(os.environ.get("AUDIMATE_DB", "audimate.sqlite3"))
+
+
+def create_dev_app():
+    return App(os.environ.get("AUDIMATE_DB", "audimate-dev.sqlite3"), development=True)

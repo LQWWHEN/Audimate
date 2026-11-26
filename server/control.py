@@ -57,8 +57,6 @@ class Control:
             self.active = dict(self.active, logging=level)
             self.pending = dict(self.pending, logging=level)
             room.monitor.set_level(level)
-            if level != "debug":
-                conn.execute("DELETE FROM transport_log")
         elif not self.maintenance:
             raise Problem(409, "请先进入维护模式")
         elif action == "configure":

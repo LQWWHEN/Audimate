@@ -19,7 +19,8 @@ AUTO_SYNC_DELAY_MS = 1200
 
 
 class OnlineRoom:
-    def __init__(self, window, dll):
+    def __init__(self, window, dll, *, development=False):
+        self.development = development
         self.dll = dll
         self.window = w = window
         self.picker = None
@@ -193,13 +194,14 @@ class OnlineRoom:
         if self.state:
             self.render(self.state)
 
-    def manual_sync(self):
+    def manual_sync(self, reason="manual"):
         if not self.listener:
             return
         if self.listener.lag is not None and self.listener.lag < 850 and not self.fallback_stream:
             self.status.set("已接近实时位置")
             return
-        self.api.report(self.listener.host["stream"], "sync", "rtc" if isinstance(self.listener,RTCWorker) else "pcm", {})
+        metrics = {"detail":{"phase":reason}} if self.api.timing else {}
+        self.api.report(self.listener.host["stream"], "sync", "rtc" if isinstance(self.listener,RTCWorker) else "pcm", metrics)
         self.stop_listen()
         self.fallback_stream = ""
         self.last_sync = time.monotonic()
@@ -211,7 +213,7 @@ class OnlineRoom:
         if (lag >= self.state["config"]["history_s"] * 1000 or
                 (lag > AUTO_SYNC_DELAY_MS and self.auto.get() and
                  time.monotonic() - self.last_sync >= int(self.interval.get()))):
-            self.manual_sync()
+            self.manual_sync("history" if lag >= self.state["config"]["history_s"] * 1000 else "auto")
 
     def toggle_listen(self):
         self.want_listen = not self.want_listen
@@ -269,7 +271,7 @@ class OnlineRoom:
         self.status.set("正在提交主持请求…")
         self.submit(lambda: self.api.request("stage/request", payload), self.render)
 
-    def release(self, message=None):
+    def release(self, message=None, reason=None):
         if not self.state["hosting"] and not self.state["pending"]:
             return
         stream = (self.state["host"] or {}).get("stream", "")
@@ -283,7 +285,10 @@ class OnlineRoom:
             self.render(state)
             self.status.set(message)
 
-        self.submit(lambda: self.api.request("stage/leave", {"stream": stream}), released)
+        data = {"stream": stream}
+        if reason and self.api.timing:
+            data["reason"] = reason
+        self.submit(lambda: self.api.request("stage/leave", data), released)
 
     def decide(self, action, applicant):
         if self.polling:
@@ -311,6 +316,7 @@ class OnlineRoom:
         host = state["host"]
         settings = state["config"]
         self.api.logging = settings["logging"]
+        self.api.timing = self.development and settings.get("dev_timing") is True and self.api.logging != "off"
         intervals = list(map(str,settings["intervals"]))
         if self.interval.get() not in intervals:
             if self.want_listen:
@@ -334,7 +340,7 @@ class OnlineRoom:
             self.stop_stream()
             self.stream = host["stream"]
             self.upload = RTCWorker(self.api, host, publish=True) if host["codec"] == "opus" else AudioUpload(self.api, self.stream)
-            self.capture = ProcessCapture(self.dll, self.selection, self.upload.add)
+            self.capture = ProcessCapture(self.dll, self.selection, self.upload.add, timing=lambda: self.api.timing)
             self.upload.start()
             self.capture.start()
             self.status.set("正在共享音频")
@@ -392,7 +398,10 @@ class OnlineRoom:
             self.levels.configure(text=f"输入电平　左 {levels[0]} dBFS　右 {levels[1]} dBFS" if self.capture.ready.is_set() else "正在打开音源…")
         if self.name and not self.future:
             if self.capture and (self.capture.error or self.upload.error):
-                self.release(self.capture.error or self.upload.error)
+                if self.api.timing and self.capture.failure_timing:
+                    self.api.report(self.stream, "error", "rtc" if isinstance(self.upload,RTCWorker) else "pcm",
+                                    {"detail":self.capture.failure_timing})
+                self.release(self.capture.error or self.upload.error, "capture" if self.capture.error else "upload")
             elif self.listener and self.listener.error:
                 self.status.set(self.listener.error)
                 if isinstance(self.listener, RTCWorker):

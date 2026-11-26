@@ -24,6 +24,30 @@ from .network import API, AudioUpload
 
 
 class UploadTests(unittest.TestCase):
+    def test_release_desktop_strips_development_output(self):
+        api = API("http://127.0.0.1")
+        api.cookie = "audimate=test"
+        with self.assertLogs("audimate.desktop", level="INFO") as output, patch.object(api, "request") as send:
+            api.report("stream", "publish", "pcm", {"upload_ms":42,"detail":{"queue_ms":30}})
+            # The reporting thread can finish before report() returns.
+            with api.report_lock:
+                worker = api.reporter
+            if worker:
+                worker.join(2)
+        send.assert_called_once_with("diagnostics",dict(stream="stream", event="publish", transport="pcm", upload_ms=42))
+        self.assertNotIn("queue_ms", output.output[0])
+
+    def test_timeout_records_waiting_for_headers(self):
+        api = API("http://127.0.0.1")
+        conn = Mock()
+        conn.getresponse.side_effect = TimeoutError("timed out")
+        detail = {}
+        with self.assertRaises(TimeoutError):
+            api.request_on(conn, "audio", b"example", timing=detail)
+        self.assertEqual((detail["phase"], detail["timed_out"], detail["reused"]), ("headers", 1, 1))
+        self.assertGreaterEqual(detail["headers_ms"], 0)
+        self.assertNotIn("body_ms", detail)
+
     def test_keepalive_and_missing_acknowledgement(self):
         received = []
 
@@ -54,7 +78,7 @@ class UploadTests(unittest.TestCase):
                 upload.start()
                 try:
                     for packet in packets:
-                        upload.packets.put((packet, time.time() * 1000), timeout=3)
+                        upload.packets.put((packet, time.time() * 1000, time.monotonic(), None), timeout=3)
                     upload.join(5)
                     self.assertFalse(upload.is_alive())
                     self.assertIn("HTTP 403", upload.error)
@@ -103,9 +127,12 @@ class OnlineTest(unittest.TestCase):
             path = Path(tmp)
             stack.enter_context(patch.dict(os.environ, {"LOCALAPPDATA": str(path / "appdata")}))
             stack.enter_context(patch.object(logging.getLogger("audimate.desktop"), "handlers", [logging.NullHandler()]))
+            stack.enter_context(patch.object(logging.getLogger("audimate.desktop.dev"), "handlers", [logging.NullHandler()]))
             url = os.environ.get("AUDIMATE_TEST_URL")
+            app = None
             if not url:
-                http = make_server("127.0.0.1", 0, App(path/"room.db"), ThreadedServer, Quiet)
+                app = App(path/"room.db", development=True)
+                http = make_server("127.0.0.1", 0, app, ThreadedServer, Quiet)
                 stack.callback(http.server_close)
                 threading.Thread(target=http.serve_forever, daemon=True).start()
                 stack.callback(http.shutdown)
@@ -121,7 +148,7 @@ class OnlineTest(unittest.TestCase):
                 source.stdin.flush()
             root = tk.Tk()
             root.withdraw()
-            ui = OnlineRoom(root, DEFAULT_DLL)
+            ui = OnlineRoom(root, DEFAULT_DLL, development=True)
             stack.callback(ui.close)
             self.assertIsNone(ui.picker)
             self.assertIs(ui.window, root)
@@ -200,6 +227,10 @@ class OnlineTest(unittest.TestCase):
                 return bool(received)
             until(read, timeout=30)
             samples = array("h", received[-1])
+            if app and not livekit:
+                until(lambda: any(s.get("detail", {}).get("capture_read_ms") is not None and
+                                  "queue_ms" in s["detail"] and "server_seq" in s["detail"]
+                                  for s in list(app.room.monitor.samples)))
             self.assertEqual(len(samples), 48000 * 2 // 5)
             self.assertGreater(max(map(abs,samples[1::2])), 50)
             self.assertLess(max(map(abs,samples[::2])), 100 if livekit else 8)

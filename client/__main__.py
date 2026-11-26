@@ -12,7 +12,7 @@ FONT = "Microsoft YaHei UI"
 PAPER, INK, MUTED, ACCENT = "#f6f7f9", "#1c2935", "#526270", "#006c60"
 
 
-def main():
+def main(*, development=False):
     parser = argparse.ArgumentParser(description="Audimate 在线音乐房间")
     parser.add_argument("--dll", type=Path, default=DEFAULT_DLL, help="采音 DLL 路径")
     args = parser.parse_args()
@@ -27,7 +27,7 @@ def main():
     style.configure("Primary.TButton", background=ACCENT, foreground="white", padding=(18, 8))
     style.map("Primary.TButton", background=[("disabled", "#586973"), ("active", "#005b52")],
               foreground=[("disabled", "#e4e9ed")])
-    OnlineRoom(root, args.dll)
+    OnlineRoom(root, args.dll, development=development)
     root.mainloop()
 
 
