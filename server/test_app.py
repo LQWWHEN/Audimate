@@ -60,6 +60,43 @@ class Integration(unittest.TestCase):
         # A new app instance opens the same account/session database.
         self.assertEqual(len(App(self.db).room.members), 0)
 
+    def test_flac_round_and_cache(self):
+        from . import flac
+        self.register(self.alice, "发送")
+        self.register(self.bob, "接收")
+        host = self.alice.request("stage/request", dict(self.choice, compression="flac"))["host"]
+        self.assertEqual(self.bob.request("room")["host"]["compression"], "flac")
+        base = "audio?stream="+host["stream"]
+        path = base+"&compression=flac"
+        pcm = (b"\xff\xff\x7f\x00\x00\x80") * 8820
+        wire = flac.encode(pcm, 44100, 24)
+        self.assertLess(len(wire), len(pcm))
+        self.alice.request(path, wire)
+        seq, received, headers = self.bob.request(path+"&sync=1", metadata=True)
+        self.assertEqual((seq, received, headers["Content-Type"]), (1, wire, "audio/flac"))
+        self.assertEqual(flac.decode(received, 44100, 24), pcm)
+        self.assertEqual(self.app.room.history.end_frame, 8820)
+        self.assertEqual(self.app.room.history.blocks[-1][1], pcm)  # shared Opus bridge input
+        self.assertIsNone(self.app.room.media.bridge)
+        self.assertEqual(self.app.room.monitor.uploaded, len(wire))
+        self.assertEqual(self.app.room.monitor.downloaded, len(wire))
+        for invalid in (pcm, wire[:-7], flac.encode(pcm, 48000, 24)):
+            with self.assertRaisesRegex(OSError, "400"):
+                self.alice.request(path, invalid)
+        with self.assertRaisesRegex(OSError, "415"):
+            self.bob.request(base)
+        with self.assertRaisesRegex(OSError, "415"):
+            self.alice.request(base, pcm)
+        with self.assertRaisesRegex(OSError, "403"):
+            self.bob.request(path, wire)
+        self.assertEqual(self.app.room.history.sequence, 1)
+        self.bob.request("stage/request", self.choice)
+        pending = self.alice.request("room")["requests"][0]
+        self.alice.request("stage/accept", dict(id=pending["id"],stream=host["stream"]))
+        self.assertEqual(self.alice.request("room")["host"]["compression"], "none")
+        with self.assertRaisesRegex(OSError, "409"):
+            self.alice.request(path, wire)
+
     def test_handoff_and_audio(self):
         self.register(self.alice, "主持甲")
         self.register(self.bob, "主持乙")

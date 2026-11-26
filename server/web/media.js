@@ -180,7 +180,8 @@ class Listening {
       const start=performance.now(), trace=detailedTiming();
       const detail=trace ? {} : null;
       this.pendingTiming = trace ? {phase:"fetch",start} : null;
-      const response = await fetch("/api/audio?stream="+h.stream+"&after="+after+(after < 0 ? "&sync=1" : "")+(trace ? "&trace=1":""), {cache:"no-store"});
+      const compressed=h.compression==="flac";
+      const response = await fetch("/api/audio?stream="+h.stream+"&after="+after+(compressed ? "&compression=flac" : "")+(after < 0 ? "&sync=1" : "")+(trace ? "&trace=1":""), {cache:"no-store"});
       if (this.closed) return;
       if (response.status === 204) { emptyReads++; emptySince ??= start; await sleep(40); continue; }
       if (!response.ok) {
@@ -189,7 +190,9 @@ class Listening {
       }
       const bodyStart=performance.now();
       if (trace) this.pendingTiming = {phase:"body",start:bodyStart};
-      const view = new DataView(await response.arrayBuffer()), decodeStart=performance.now();
+      if (compressed !== (response.headers.get("Content-Type") === "audio/flac"))
+        throw Error("服务端返回的音频与主持公布的压缩格式不符");
+      const wire = await response.arrayBuffer(), decodeStart=performance.now();
       if (trace) {
         const receivedAt = Date.now();
         Object.assign(detail, JSON.parse(response.headers.get("X-Audimate-Timing") || "{}"),
@@ -208,6 +211,8 @@ class Listening {
       const gap = after >= 0 && seq !== after + 1;
       if (gap) diagnostics(h, "gap", "pcm", {discarded: Math.max(0,seq-after-1), ...(trace ? {detail} : {})});
       after = seq;
+      const view = new DataView(compressed ? await flacPacket("decode_packet",wire,rate,bits) : wire);
+      if (this.closed) return;
       const width = bits/8, buffer = ctx.createBuffer(2, view.byteLength/(width*2),rate);
       for (let channel=0; channel<2; channel++) {
         const samples = buffer.getChannelData(channel);
@@ -245,4 +250,26 @@ class Listening {
       source.start(next); next+=buffer.duration;
     }
   }
+}
+let flacWorker, flacSequence=0;
+const flacPending=new Map();
+function flacPacket(op, buffer, rate, bits) {
+  if (!flacWorker) {
+    flacWorker=new Worker("/flac-worker.js");
+    flacWorker.onmessage=({data:{id,output,error}})=>{
+      const job=flacPending.get(id);
+      flacPending.delete(id);
+      if (error) job.reject(Error(error)); else job.resolve(output);
+    };
+    flacWorker.onerror=()=>{
+      flacWorker.terminate(); flacWorker=null;
+      for (const job of flacPending.values()) job.reject(Error("无法启动 FLAC 编解码"));
+      flacPending.clear();
+    };
+  }
+  return new Promise((resolve,reject)=>{
+    const id=++flacSequence;
+    flacPending.set(id,{resolve,reject});
+    flacWorker.postMessage({id,op,buffer,rate,bits},[buffer]);
+  });
 }

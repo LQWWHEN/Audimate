@@ -9,6 +9,7 @@ import secrets
 # Detailed fields are accepted only by the development server. Units for stage
 # durations are milliseconds; packet identifiers are scoped to one host stream.
 STAGES = {
+    "encode_ms": "主持 · FLAC 编码",
     "capture_read_ms": "采集 · 等待末帧", "pack_ms": "采集 · 组包跨度", "handoff_ms": "采集 · 工作线程交付",
     "queue_ms": "主持 · 待发排队", "connect_ms": "HTTP · 建连（含 TLS）", "send_ms": "HTTP · 写请求",
     "headers_ms": "HTTP · 等响应头", "body_ms": "HTTP · 读响应体", "fetch_ms": "听众 · 拉取总耗时",
@@ -260,7 +261,8 @@ class Monitor:
         stream = None
         if host:
             stream = {k: host[k] for k in ("name", "source", "rate", "bits")}
-            stream.update(codec=host["codec"], age_s=int(now - room.stage_since), sequence=room.history.sequence,
+            stream.update(codec=host["codec"], compression=host.get("compression", "none"),
+                          age_s=int(now - room.stage_since), sequence=room.history.sequence,
                           last_audio_s=None if room.last_audio is None else round(now - room.last_audio, 1))
         audio = {"opus_enabled": opus_enabled}
         for i, (direction, pcm) in enumerate((("rx", self.uploaded), ("tx", self.downloaded))):

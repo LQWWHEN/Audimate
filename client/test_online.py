@@ -187,6 +187,10 @@ class OnlineTest(unittest.TestCase):
             self.assertIsNone(ui.api.request("room")["host"])
             ui.stage.invoke()
             self.assertEqual(picker.selected().pid, player_pid)
+            use_flac = os.getenv("AUDIMATE_TEST_FLAC") == "1"
+            if use_flac:
+                from server import flac
+                picker.codec.set("无损 PCM · FLAC 压缩")
             picker.action.invoke()
             until(lambda: ui.stream)
             self.assertFalse(picker.winfo_manager())
@@ -221,9 +225,11 @@ class OnlineTest(unittest.TestCase):
             received = []
             livekit = ui.state["livekit"]
             def read():
-                packet = peer.request("audio?stream=" + ui.stream)
-                if packet and max(map(abs,array("h",packet[1])[1::2]), default=0) > 50:
-                    received.append(packet[1])
+                packet = peer.request("audio?stream=" + ui.stream + ("&compression=flac" if use_flac else ""))
+                if packet:
+                    pcm = flac.decode(packet[1], 48000, 16) if use_flac else packet[1]
+                    if max(map(abs,array("h",pcm)[1::2]), default=0) > 50:
+                        received.append(pcm)
                 return bool(received)
             until(read, timeout=30)
             samples = array("h", received[-1])
@@ -249,8 +255,12 @@ class OnlineTest(unittest.TestCase):
             self.assertIsNone(peer.request("room")["host"])
 
             from client.playback import Output
+            if use_flac:
+                peer_source["compression"] = "flac"
             peer_host = peer.request("stage/request", peer_source)["host"]
-            peer.request("audio?stream=" + peer_host["stream"], received[-1])
+            audio_path = "audio?stream=" + peer_host["stream"] + ("&compression=flac" if use_flac else "")
+            audio_packet = flac.encode(received[-1], 48000, 16) if use_flac else received[-1]
+            peer.request(audio_path, audio_packet)
             until(lambda: ui.state["host"] and ui.state["host"]["stream"] == peer_host["stream"])
             peer.request("stage/track", {"stream": peer_host["stream"], "track": {"title": "听众测试", "artist": "歌手甲"}})
             until(lambda: "听众测试 - 歌手甲" in ui.info.cget("text"))
@@ -266,7 +276,7 @@ class OnlineTest(unittest.TestCase):
                 def playing():
                     nonlocal last
                     if time.monotonic()-last >= .2:
-                        peer.request("audio?stream=" + peer_host["stream"], received[-1])
+                        peer.request(audio_path, audio_packet)
                         last = time.monotonic()
                     return any(max(map(abs,array("h",pcm)),default=0)>50 for pcm in written)
                 until(playing, timeout=30)

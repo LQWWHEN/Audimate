@@ -184,8 +184,9 @@ class API:
 
 
 class AudioUpload(threading.Thread):
-    def __init__(self, api, stream):
+    def __init__(self, api, stream, host=None):
         super().__init__(daemon=True)
+        self.host = host or {}
         self.api, self.stream = api, stream
         self.cancel = threading.Event()
         self.buffer = bytearray()
@@ -248,6 +249,12 @@ class AudioUpload(threading.Thread):
                 return
             start = time.monotonic()
             path = f"audio?stream={self.stream}&captured={captured+self.api.offset:.2f}"
+            if self.host.get("compression") == "flac":
+                from server.flac import encode
+                pcm = encode(pcm, self.host["rate"], self.host["bits"])
+                path += "&compression=flac"
+                if detail is not None:
+                    detail.update(encode_ms=(time.monotonic()-start)*1000, packet_bytes=len(pcm))
             if self.api.timing and detail:
                 path += f"&packet={detail['source_seq']}&sent={round(time.time()*1000+self.api.offset)}"
                 detail["queue_ms"] = (start-queued)*1000
@@ -358,6 +365,9 @@ class AudioListener(threading.Thread):
                     self.cancel.wait(.025)
                     continue
                 path = f"audio?stream={self.host['stream']}&after={seq}&sync={int(seq<0)}"
+                compressed = self.host.get("compression") == "flac"
+                if compressed:
+                    path += "&compression=flac"
                 detail = {} if self.api.timing else None
                 start = time.monotonic()
                 result = self.api.request(path + ("&trace=1" if detail is not None else ""), metadata=True, timing=detail)
@@ -373,6 +383,13 @@ class AudioListener(threading.Thread):
                             if 0 <= delay <= 60000:
                                 detail["downlink_est_ms"] = delay
                     empty_reads, poll_start = 0, None
+                    if compressed != (headers.get("Content-Type") == "audio/flac"):
+                        raise ValueError("服务端返回的音频与主持公布的压缩格式不符")
+                    if compressed:
+                        from server.flac import decode
+                        with timed(detail, "decode", "decode_ms"):
+                            pcm = decode(pcm, self.host["rate"], self.host["bits"])
+                        fetched = time.monotonic()
                     if headers.get("X-Reset") == "1":
                         while not self.packets.empty():
                             try:

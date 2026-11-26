@@ -15,10 +15,12 @@ import traceback
 from urllib.parse import parse_qs, urlsplit
 
 if __package__:
+    from . import flac
     from .monitor import Member, Monitor, client_type
     from .control import DEFAULT, Control, Problem
     from .media import Media, History
 else:  # Gunicorn imports app:create_app() from the deployment directory.
+    import flac
     from monitor import Member, Monitor, client_type
     from control import DEFAULT, Control, Problem
     from media import Media, History
@@ -172,7 +174,7 @@ class Room:
         return {"host": public_host,
                 "hosting": mine, "pending": key in self.pending,
                 "requests": [{"id": req["id"], "name": req["name"]} for req in self.pending.values()] if mine else [],
-                "members": len(self.members), "livekit": self.media.enabled}
+                "members": len(self.members), "livekit": self.media.enabled, "flac": flac.AVAILABLE}
 
     def action(self, key, name, action, data):
         if action == "request":
@@ -183,12 +185,17 @@ class Room:
                     not isinstance(label, str) or not 1 <= len(label.strip()) <= 120):
                 raise Problem(400, "音源或格式无效")
             codec = data.get("codec", "pcm")
+            compression = data.get("compression", "none")
+            if compression not in ("none", "flac") or compression == "flac" and codec != "pcm":
+                raise Problem(400, "只有 PCM 上传支持 FLAC 压缩")
+            if compression == "flac" and not flac.AVAILABLE:
+                raise Problem(400, "服务端未启用 FLAC")
             if codec not in ("pcm", "opus") or codec == "opus" and not self.media.enabled:
                 raise Problem(400, "当前服务不支持所选传输格式")
             bitrate = data.get("bitrate", 128000)
             if codec == "opus" and (type(bitrate) is not int or bitrate not in (64000, 128000, 256000)):
                 raise Problem(400, "不支持所选 Opus 码率")
-            choice = dict(name=name, rate=rate, bits=bits, source=label.strip(), codec=codec,
+            choice = dict(name=name, rate=rate, bits=bits, source=label.strip(), codec=codec, compression=compression,
                           channels=2, bitrate=bitrate if codec == "opus" else rate * bits * 2, id=secrets.token_hex(8))
             if not self.host:
                 self.grant(key, choice)
@@ -328,6 +335,7 @@ class App:
             entered = time.monotonic()
         assets = {"/": "index.html", "/app.js": "app.js", "/app.css": "app.css", "/audio-worker.js": "audio-worker.js"}
         assets.update({"/vendor/livekit.js": "vendor/livekit-client-2.25.0.js", "/media.js": "media.js",
+                       "/flac-worker.js": "flac-worker.js", "/vendor/flac-1.5.0.wasm": "vendor/flac-1.5.0.wasm",
                        "/ops": "ops/index.html", "/ops/": "ops/index.html",
                        "/ops/style.css": "ops/style.css", "/ops/dashboard.js": "ops/dashboard.js"})
         if self.development:
@@ -337,8 +345,9 @@ class App:
             raise Problem(404, "资源不存在")
         if path in assets and method == "GET":
             file = WEB / assets[path]
-            media_type = {".js": "text/javascript", ".css": "text/css", ".html": "text/html"}[file.suffix]
-            return 200, file.read_bytes(), [("Content-Type", media_type + "; charset=utf-8")]
+            media_type = {".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8",
+                          ".html": "text/html; charset=utf-8", ".wasm": "application/wasm"}[file.suffix]
+            return 200, file.read_bytes(), [("Content-Type", media_type)]
         if path == "/api/health" and method == "GET":
             return 200, encoded({"service": "audimate", "ok": True}), []
         if method == "POST" and env.get("HTTP_ORIGIN"):
@@ -416,18 +425,35 @@ class App:
                     snapshot["operator"] = user[0]
                     return 200, encoded(snapshot), []
         query = parse_qs(env.get("QUERY_STRING", ""))
+        room = self.room
+        compression = query.get("compression", ["none"])[0]
+        decoded = None
         packet, data = None, None
         if method == "POST" and path == "/api/audio":
             if env.get("CONTENT_TYPE") != "application/octet-stream":
                 raise Problem(415, "需要 PCM 数据")
             if trace:
                 read_start = time.monotonic()
-            packet = body(env, 768000)
+            packet = body(env, flac.CAPACITY if compression == "flac" else 768000)
             if trace:
                 body_ms = (time.monotonic()-read_start)*1000
+            if compression == "flac":
+                # Validate the bounded stream outside the room lock. The normal
+                # commit path below rechecks membership, host and stream after decode.
+                with room.lock:
+                    host = room.host
+                    if not host or [host["stream"]] != query.get("stream"):
+                        raise Problem(409, "主持已变更")
+                    if key != host["key"]:
+                        raise Problem(403, "仅主持可发送音频")
+                    if host.get("compression") != "flac":
+                        raise Problem(415, "与主持公布的压缩格式不符")
+                try:
+                    decoded = flac.decode(packet, host["rate"], host["bits"])
+                except ValueError as exc:
+                    raise Problem(400, str(exc)) from exc
         elif method == "POST":
             data = fields(env)
-        room = self.room
         room_read = path == "/api/room" and method == "GET"
         stage_write = path in ("/api/stage/request", "/api/stage/leave", "/api/stage/accept",
                                "/api/stage/reject", "/api/stage/track") and method == "POST"
@@ -485,13 +511,16 @@ class App:
                 host = room.host
                 if not host or query.get("stream", [""])[0] != host["stream"]:
                     raise Problem(409, "主持已变更")
+                if compression != host.get("compression", "none"):
+                    raise Problem(415, "请使用支持本轮主持压缩格式的客户端")
                 if packet is not None:
                     if host["key"] != key:
                         raise Problem(403, "仅主持可发送音频")
                     if host["codec"] != "pcm":
                         raise Problem(409, "本轮主持使用 LiveKit 音轨")
                     align = 2 * (host["bits"] // 8)
-                    if not packet or len(packet) % align or len(packet) > align * host["rate"] // 2:
+                    pcm = decoded if decoded is not None else packet
+                    if not pcm or len(pcm) % align or len(pcm) > align * host["rate"] // 2:
                         raise Problem(400, "音频块长度无效")
                     try:
                         captured = float(query["captured"][0]) if "captured" in query else None
@@ -506,7 +535,8 @@ class App:
                         if re.fullmatch(r"[0-9]{1,12}", packet_id):
                             detail["source_seq"] = int(packet_id)
                         store_start = time.monotonic()
-                    room.history.append(packet, host["rate"], align // 2, captured, detail)
+                    room.history.append(pcm, host["rate"], align // 2, captured, detail,
+                                        wire=packet if decoded is not None else None)
                     room.last_audio = time.monotonic()
                     room.monitor.traffic(room.members[key], received=len(packet))
                     if trace:
@@ -533,20 +563,21 @@ class App:
                 if not item:
                     room.monitor.empty_reads += 1
                     return 204, b"", []
-                room.monitor.traffic(room.members[key], sent=len(item[1]))
+                wire = item[7] if compression == "flac" else item[1]
+                room.monitor.traffic(room.members[key], sent=len(wire))
                 if after >= 0:
                     room.monitor.cursor_gaps += max(0, item[0] - after - 1)
-                headers = [("Content-Type", "application/octet-stream"), ("X-Sequence", str(item[0])),
+                headers = [("Content-Type", "audio/flac" if compression == "flac" else "application/octet-stream"), ("X-Sequence", str(item[0])),
                            ("X-Frame", str(item[2])), ("X-Behind-Ms", str(round((room.history.end_frame-item[2])*1000/rate))),
                            ("X-Reset", "1" if expired else "0")]
                 if item[5] is not None:
                     headers.append(("X-Captured-Ms", str(item[5])))
                 if trace and query.get("trace") == ["1"]:
-                    timing = dict(item[6] or {}, server_seq=item[0], packet_bytes=len(item[1]),
+                    timing = dict(item[6] or {}, server_seq=item[0], packet_bytes=len(wire),
                                   residence_ms=(time.monotonic()-item[4])*1000, serve_ms=(time.monotonic()-entered)*1000)
                     headers.append(("X-Audimate-Timing", json.dumps({k:round(v,2) for k,v in timing.items()}, separators=(",",":"))))
                     headers.append(("X-Audimate-Served-Ms", str(round(time.time()*1000))))
-                return 200, item[1], headers
+                return 200, wire, headers
             config = dict(self.control.active, dev_timing=True) if self.development else self.control.active
             return 200, encoded(dict(room.status(key), config=config)), []
 
@@ -573,7 +604,9 @@ class App:
             headers.append(("Content-Type", "application/json; charset=utf-8"))
         headers.extend([("Content-Length", str(len(payload))), ("Cache-Control", "no-store"),
                         ("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer"),
-                        ("Content-Security-Policy", "default-src 'self'; connect-src 'self' wss: ws://localhost:* ws://127.0.0.1:*; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")])
+                        ("Content-Security-Policy", "default-src 'self'; " +
+                         ("script-src 'self' 'wasm-unsafe-eval'; " if path == "/flac-worker.js" else "") +
+                         "connect-src 'self' wss: ws://localhost:* ws://127.0.0.1:*; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")])
         start_response("{} {}".format(code, responses[code]), headers)
         return [payload]
 

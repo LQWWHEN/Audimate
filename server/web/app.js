@@ -104,7 +104,7 @@ function refreshPlayback(force=false) {
     return;
   }
   const task = playback = new Listening(listenContext, host, transport);
-  $("actual").textContent = transport === "rtc" ? "LiveKit · Opus 立体声" : host.codec === "opus" ? "Opus 解码缓存" : "无损 PCM";
+  $("actual").textContent = transport === "rtc" ? "LiveKit · Opus 立体声" : host.codec === "opus" ? "Opus 解码缓存" : pcmLabel(host);
   (transport === "rtc" ? task.runRTC() : task.runPCM()).catch(e => {
     if (task.closed || playback!==task) return;
     const failure = task.pendingTiming || task.rtc?.failure;
@@ -158,6 +158,9 @@ async function poll(version) {
   }
   if (epoch === version) timer = setTimeout(() => poll(version), 1100);
 }
+function pcmLabel(host) {
+  return host.compression === "flac" ? "无损 PCM · FLAC 压缩" : "无损 PCM";
+}
 function render(state) {
   room = state;
   const h = room.host;
@@ -165,7 +168,8 @@ function render(state) {
     $("codec").value = room.livekit ? "opus" : "pcm";
     firstRoom = false;
   }
-  for (const option of $("codec").options) option.disabled = !room.livekit && option.value !== "pcm";
+  for (const option of $("codec").options)
+    option.disabled = option.value === "flac" ? !state.flac : option.value.startsWith("opus") && !room.livekit;
   $("codec").disabled = room.hosting || room.pending || requesting;
   const intervals = state.config.intervals.slice();
   if (listening && !intervals.includes(prefs.interval)) intervals.push(prefs.interval);
@@ -181,7 +185,7 @@ function render(state) {
   $("members").textContent = room.members + " 人在线";
   $("source").textContent = h ? h.source : "等待主持上台";
   $("hostInfo").textContent = h
-    ? h.name + " · " + h.rate / 1000 + " kHz · " + h.bits + "-bit · " + (h.codec === "opus" ? "Opus "+h.bitrate/1000+" kbps" : "无损 PCM")
+    ? h.name + " · " + h.rate / 1000 + " kHz · " + h.bits + "-bit · " + (h.codec === "opus" ? "Opus "+h.bitrate/1000+" kbps" : pcmLabel(h))
     : "";
   $("listen").disabled = room.hosting && !listening;
   $("stage").textContent = leaving ? "正在下台…" : room.hosting
@@ -329,7 +333,8 @@ $("stage").onclick = async () => {
     const state = await api("stage/request", {
       source,
       rate: captureContext.sampleRate,
-      bits, codec: $("codec").value === "pcm" ? "pcm" : "opus",
+      bits, codec: $("codec").value.startsWith("opus") ? "opus" : "pcm",
+      compression: $("codec").value === "flac" ? "flac" : "none",
       bitrate: ({opus64:64000, opus256:256000})[$("codec").value] || 128000,
     });
     if (version !== epoch) return;
@@ -403,10 +408,15 @@ async function publish(stream, bits) {
       const trace = detailedTiming() && detail;
       if (trace) trace.queue_ms = start-queued;
       try {
+        const compressed=host.compression==="flac";
+        const wire=compressed ? await flacPacket("encode_packet", data, host.rate, host.bits) : data;
+        if (generation!==stageGeneration) break;
+        if (trace && compressed) Object.assign(trace,{encode_ms:performance.now()-start,packet_bytes:wire.byteLength});
+        const sendStart=performance.now();
         const traceQuery = trace ? "&packet="+trace.source_seq+(clockOffset==null ? "" : "&sent="+Math.round(Date.now()+clockOffset)) : "";
-        const r=await fetch("/api/audio?stream="+stream+(captured == null ? "" : "&captured="+Math.round(captured))+traceQuery,
-          {method:"POST",headers:{"Content-Type":"application/octet-stream"},body:data});
-        if (trace) {trace.fetch_headers_ms=performance.now()-start; trace.http_status=r.status;}
+        const r=await fetch("/api/audio?stream="+stream+(compressed ? "&compression=flac" : "")+(captured == null ? "" : "&captured="+Math.round(captured))+traceQuery,
+          {method:"POST",headers:{"Content-Type":"application/octet-stream"},body:wire});
+        if (trace) {trace.fetch_headers_ms=performance.now()-sendStart; trace.http_status=r.status;}
         if (!r.ok) throw Error("音频上传已结束");
         if (trace) {
           const bodyStart=performance.now(), ack=await r.json();

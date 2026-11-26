@@ -74,12 +74,12 @@ async function run() {
   const dir = await mkdtemp(path.join(os.tmpdir(), "audimate-e2e-"));
   let url = process.env.AUDIMATE_TEST_URL;
   const useRTC = process.argv.includes("--livekit");
+  const lossless = process.argv.includes("--flac") ? "flac" : "pcm";
   let sfu;
   if (useRTC && !url && !process.env.LIVEKIT_URL) {
     const key=randomBytes(10).toString("hex"), secret=randomBytes(32).toString("hex");
     const file=path.join(dir,"livekit.yaml");
-    const lan=Object.values(os.networkInterfaces()).flat().find(x=>x.family==="IPv4"&&!x.internal)?.address || "127.0.0.1";
-    await writeFile(file, "port: 18880\nbind_addresses: [127.0.0.1]\nrtc:\n  node_ip: "+lan+"\n  advertise_internal_ip: true\n  enable_loopback_candidate: true\n  tcp_port: 18881\n  udp_port: 18882\nkeys:\n  "+key+": "+secret+"\n");
+    await writeFile(file, "port: 18880\nbind_addresses: [127.0.0.1]\nrtc:\n  node_ip: 127.0.0.1\n  advertise_internal_ip: true\n  enable_loopback_candidate: true\n  tcp_port: 18881\n  udp_port: 18882\nkeys:\n  "+key+": "+secret+"\n");
     sfu=spawn(process.env.LIVEKIT_BIN||"livekit-server",["--config",file],{windowsHide:true,stdio:"ignore"});
     Object.assign(process.env,{LIVEKIT_API_KEY:key,LIVEKIT_API_SECRET:secret,LIVEKIT_URL:"ws://127.0.0.1:18880",LIVEKIT_INTERNAL_URL:"http://127.0.0.1:18880"});
   }
@@ -197,7 +197,7 @@ async function run() {
       });
       await listener.click("#listen");
     } else {
-      await host.selectOption("#codec","pcm");
+      await host.selectOption("#codec",lossless);
       await listener.selectOption("#receive","pcm");
     }
     await host.selectOption("#quality", "96000/24");
@@ -288,7 +288,7 @@ async function run() {
         delete window.testOldGrant;
         return r.status;
       }),403,"下台后旧令牌必须失效");
-      await host.selectOption("#codec","pcm");
+      await host.selectOption("#codec",lossless);
       await listener.evaluate(()=>window.decodedAnalyser=null);
       await host.click("#stage");
       try {await listener.waitForFunction(hasTone,null,{timeout:25000});} catch {
@@ -322,6 +322,14 @@ async function run() {
       }
     }
     assert.match(await listener.textContent("#hostInfo"), /96 kHz · 24-bit/);
+    if (lossless==="flac") {
+      assert.match(await listener.textContent("#actual"), /FLAC/);
+      const metadata=await listener.evaluate(async()=>{
+        const response=await fetch("/api/audio?compression=flac&stream="+room.host.stream);
+        return [room.host.compression,response.headers.get("Content-Type"),new TextDecoder().decode((await response.arrayBuffer()).slice(0,4))];
+      });
+      assert.deepEqual(metadata,["flac","audio/flac","fLaC"]);
+    }
     assert.equal(await listener.textContent("#source"), "应用窗口");
     if (windowPlayers) {
       await windowPlayers.setMinimized(true);

@@ -266,6 +266,8 @@ class OnlineRoom:
                        codec="opus" if self.state["livekit"] and codec.startswith("Opus") else "pcm")
         if payload["codec"]=="opus":
             payload["bitrate"] = int(codec.split()[1])*1000
+        elif "FLAC" in codec:
+            payload["compression"] = "flac"
         self.show_room()
         self.stage.state(["disabled"])
         self.status.set("正在提交主持请求…")
@@ -335,11 +337,12 @@ class OnlineRoom:
             self.listener = RTCWorker(self.api, host) if rtc else AudioListener(self.api, host)
             self.last_sync = time.monotonic()
             self.listener.start()
-            self.status.set("收听 LiveKit · Opus" if rtc else "收听 Opus 解码缓存" if host["codec"]=="opus" else "收听无损 PCM")
+            self.status.set("收听 LiveKit · Opus" if rtc else "收听 Opus 解码缓存" if host["codec"]=="opus"
+                            else "收听无损 PCM · FLAC 解压" if host.get("compression")=="flac" else "收听无损 PCM")
         if state["hosting"] and self.selection and self.stream != host["stream"]:
             self.stop_stream()
             self.stream = host["stream"]
-            self.upload = RTCWorker(self.api, host, publish=True) if host["codec"] == "opus" else AudioUpload(self.api, self.stream)
+            self.upload = RTCWorker(self.api, host, publish=True) if host["codec"] == "opus" else AudioUpload(self.api, self.stream, host)
             self.capture = ProcessCapture(self.dll, self.selection, self.upload.add, timing=lambda: self.api.timing)
             self.upload.start()
             self.capture.start()
@@ -357,6 +360,8 @@ class OnlineRoom:
                  else "正在等候下一位主持，开播后将自动收听" if self.want_listen else "等待主持上台")
         if host:
             label += f" · Opus {host['bitrate']//1000} kbps" if host["codec"]=="opus" else " · 无损 PCM"
+            if host.get("compression") == "flac":
+                label += " · FLAC 压缩"
         self.info.configure(text=f"{self.name}  ·  {state['members']} 人在线\n{label}")
         listen_label = "收听" if not self.want_listen else "停止收听" if host else "取消等候"
         self.listen.configure(text=listen_label, state="disabled" if state["hosting"] and not self.want_listen else "normal")

@@ -33,12 +33,12 @@ class History:
                                self.end_frame - self.blocks[0][2] > rate * self.seconds or len(self.blocks) > 3000):
             self.blocks.popleft()
 
-    def append(self, pcm, rate, width, captured=None, trace=None):
+    def append(self, pcm, rate, width, captured=None, trace=None, *, wire=None):
         now = time.monotonic()
         start = self.end_frame
         self.end_frame += len(pcm) // (2 * width)
         self.sequence += 1
-        self.blocks.append((self.sequence, pcm, start, self.end_frame, now, captured, trace))
+        self.blocks.append((self.sequence, pcm, start, self.end_frame, now, captured, trace, wire))
         self.prune(now, rate)
 
     def read(self, after, rate, align):

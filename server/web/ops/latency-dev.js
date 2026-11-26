@@ -1,6 +1,7 @@
 // All times are milliseconds. Only the selected view is decomposed.
 const stages = [
   ["capture", "采集与组包", "#286959"], ["queue", "主持待发队列", "#539982"],
+  ["encode", "FLAC 编码", "#356584"],
   ["uplink", "上传至服务入口", "#426da1"], ["ingest", "服务端入库", "#675b94"],
   ["residence", "服务端缓存驻留", "#ab7938"], ["downlink", "响应传至听众", "#51899a"],
   ["decode", "听众解码", "#936479"], ["play", "等待播放", "#5e754b"],
@@ -25,10 +26,12 @@ function breakdown(r, sender) {
   if (sender && Number.isSafeInteger(d.source_seq) && sender.source_seq === d.source_seq && measured(age) && measured(up)) {
     const capture = amount(sender.pack_ms) + amount(sender.handoff_ms);
     const queue = amount(sender.queue_ms);
+    const encode = amount(sender.encode_ms);
     // Capture to store contains both the pre-send stages and the upload.
-    if (capture + queue <= age - up + 2) {
+    if (capture + queue + encode <= age - up + 2) {
       parts.capture = capture;
       parts.queue = queue;
+      parts.encode = encode;
     }
   }
   const sum = Object.values(parts).reduce((a,b)=>a+b,0);
@@ -126,7 +129,8 @@ function refreshPie() {
   const {host,timing,service}=snapshot;
   const view=panel.querySelector("#pieView").value, seconds=Number(panel.querySelector("#pieWindow").value);
   const path=panel.querySelector("#piePath"), peer=panel.querySelector("#piePeer");
-  const pathName=t=>(host ? codecName(host.codec) : "—")+" → "+codecName(t);
+  const pathName=t=>(host?.compression==="flac" ? "FLAC" : host ? codecName(host.codec) : "—")+" → "+
+    (host?.compression==="flac" && t==="pcm" ? "FLAC" : codecName(t));
   const now=snapshot.time+(performance.now()-lastUpdate)/1000;
   const samples=host && timing.round_id && service.active.logging==="debug"
     ? snapshot.samples.filter(s=>s.round_id===timing.round_id) : [];

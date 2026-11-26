@@ -8,6 +8,7 @@ Windows 客户端与网页共用一套账号和一间音乐房。注册成功后
 
 ```powershell
 New-Item -ItemType Directory -Force build | Out-Null
+python -m pip install wasmtime==39.0.0
 python -m server.dev --db build/audimate-local.sqlite3
 ```
 
@@ -18,6 +19,10 @@ python -m server.dev --db build/audimate-local.sqlite3
 - 房间里的「下台」会停止采音和上传。浏览器单独管理共享浮窗，如有「隐藏」按钮可手动收起；选择浏览器的「停止共享」也会结束本轮主持。[W3C 屏幕采集规范](https://w3c.github.io/mediacapture-screen-share/)
 - 已最小化或收进托盘的播放器可能不会出现在浏览器的「窗口」列表。先还原播放器再选择，共享开始后可将播放器最小化。下台会结束采集，下次上台需再次选择。需要在窗口始终隐藏时开始主持，可使用 Windows 客户端的「共享进程」。[W3C 屏幕采集规范，第 5.2 节](https://www.w3.org/TR/screen-capture/)
 - 听众点击“收听”。主持更换后界面显示新音源，会自动接入下一轮主持。
+
+## PCM 的 FLAC 传输
+
+FLAC 传输复用原有 HTTPS 分块。主持设置随申请保留到获准上台，再随主持轮次发布。PCM 收听端和回退通道按本轮格式拉取音频，每个 FLAC 包都是可单独解码的完整流。服务端校验解码后的采样率、位深、声道和样本数，在同一个缓存条目保留压缩原包和供共享 Opus 桥接使用的 PCM。按实际帧数推进时间线，按线上字节数统计流量。旧版本客户端请求压缩轮次的 PCM 数据会收到 HTTP 415，可更新客户端或改用 Opus。构建编解码模块的说明见[FLAC 编解码模块](../codec/README.md)。
 
 ## Ubuntu 测试机部署
 

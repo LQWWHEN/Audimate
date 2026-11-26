@@ -179,7 +179,7 @@ function render(s) {
   byId("source").textContent = host ? host.source : "等待主持上台";
   byId("host").textContent = host ? "主持 · " + host.name : "";
   const details = [
-    ["音频格式", host ? host.rate / 1000 + " kHz / " + host.bits + "-bit / 双声道" : "—"],
+    ["音频格式", host ? host.rate / 1000 + " kHz / " + host.bits + "-bit / 双声道" + (host.compression==="flac" ? " · FLAC" : "") : "—"],
     ["最近上行", flowing ? host.last_audio_s + " 秒前" : "—"],
     ["缓冲块数", s.buffer_blocks + " 块 · 上限 " + s.history_s + " 秒"],
     ["当前流序号", host ? host.sequence : "—"]

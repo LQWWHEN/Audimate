@@ -1,2 +1,3 @@
 server/deploy/*.patch text eol=lf whitespace=-space-before-tab
 server/web/vendor/*.js -text
+server/web/vendor/*.wasm binary

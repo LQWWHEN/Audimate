@@ -84,9 +84,13 @@ class HostSetup(ttk.Frame):
 
     def room_state(self, state):
         self.action.configure(text="提交申请" if state["host"] else "开始主持")
-        if not state["livekit"]:
+        options = ["Opus 64 kbps", "Opus 128 kbps", "Opus 256 kbps"] if state["livekit"] else []
+        options.append("无损 PCM")
+        if state.get("flac"):
+            options.append("无损 PCM · FLAC 压缩")
+        if self.codec.get() not in options:
             self.codec.set("无损 PCM")
-        self.codec_select.configure(state="readonly" if state["livekit"] else "disabled")
+        self.codec_select.configure(values=options, state="readonly" if len(options)>1 else "disabled")
 
     def selected(self):
         rows = self.tree.selection()

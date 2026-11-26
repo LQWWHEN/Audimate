@@ -23,6 +23,8 @@ Windows 桌面端启动即进入登录页，登录、收听、主持设置和审
 
 ## 采集与分发
 
+**PCM 无损压缩。** 网页和 Windows 主持可在每轮上台时选择「无损 PCM · FLAC 压缩」。房间公布本轮压缩格式，走 HTTPS 的听众自动按该格式解压。服务端按解码样本数维护时间线，复用主持上传的压缩块分发。首位选择 Opus 的听众触发这一轮的共享 LiveKit 桥接，多位 Opus 听众订阅同一条音轨。运维 PCM 流量计入实际 HTTP 音频负载字节。
+
 **桌面播放器。** 主持人选择应用后，Windows 采集模块用 WASAPI Application Loopback 的 `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` 模式捕获目标 PID 及其子进程。若播放器委托进程树之外的服务发声，或内容受保护，可能只能得到静音。界面应显示所选来源和实时电平；捕获失败时提示重新选源。默认输出设备的全局回环会混入其他应用声音，不能作为自动回退方式。微软样例给出的最低系统构建号为 20348，首版建议以 Windows 11 实机验证。[微软按进程采音样例](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/) · [回环录音与受保护内容](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording)
 
 **网页采音。** 主持人通过 `getDisplayMedia()` 选择应用窗口或音乐标签页。网页用 `audioSelection: "preferred"` 请求预选音频，用 `windowAudio: "window"` 请求应用独立音轨。Windows Chrome 158 已在原生选择器默认设置下验证可直接共享应用音频。浏览器保留用户的最终选择和停止共享入口，房间点「下台」会停止采集与上传。对于窗口，Chromium 可能回退到系统混音，因此只接受其明确标记为 `Application Audio` 的音轨。同一浏览器里要隔离某个音乐网页时，应选具体标签页。只上传音频。[音频选择偏好](https://w3c.github.io/mediacapture-screen-share/#dom-displaymediastreamoptions-audioselection) · [Chromium 音轨标记实现](https://chromium.googlesource.com/chromium/src/+/refs/tags/158.0.8127.37/chrome/browser/media/webrtc/desktop_capture_devices_util.cc)
@@ -47,7 +49,7 @@ Windows 桌面端启动即进入登录页，登录、收听、主持设置和审
 
 开发测试使用独立桌面入口 `client/start-dev.cmd` 和服务工厂 `create_dev_app()`。开发运维页可关联 PCM 源包和服务端缓存包，查看各阶段的时延分布及故障阶段，也能查看 LiveKit 端侧和跨格式桥接计时。正式入口保持基础诊断，独立保存和读取基础样本。[分段指标和版本入口](server/README.md#开发版链路计时)
 
-已实测开发与正式网页各一轮 PCM 主持、收听和交接，Windows 进程采集到 Chrome 播放，HTTP 等响应头超时归类，以及丢失确认后按源包号查入库。Linux 测试站的两个隔离媒体房间验证了 PCM → Opus 和 Opus → PCM 双向实际音频及桥接计时。Windows 同机 SFU 的 PCM → Opus 用例仍出现等待音轨超时。
+已实测开发与正式网页各一轮 PCM 主持、收听和交接，Windows 进程采集到 Chrome 播放，HTTP 等响应头超时归类，以及丢失确认后按源包号查入库。Linux 测试站的两个隔离媒体房间验证了 PCM → Opus 和 Opus → PCM 双向实际音频及桥接计时。Windows 同机 SFU 改为通告测试实际绑定的回环地址后，已验证 FLAC 主持、一位逐样本还原的无损听众和两位订阅同一条有声音轨的 Opus 听众。Chrome 的 Opus 与无损路径切换也已实测。
 
 运维首页按 PCM 与 LiveKit RTP 合算音频总进出站（含同机桥接），方向和格式可独立筛选四条趋势线。开发版「播放延迟构成」按路径、指定听众或当前最慢听众查看，默认最近 30 秒，每 5 秒仅计算所选视图。饼图分母为完整预计播放延迟，未归因时间单列，缺少可信时间的 Opus 路径展示可用指标。
 
