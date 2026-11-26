@@ -1,6 +1,8 @@
 // Served only by create_dev_app. All values supplied by clients are rendered as text.
+import {presentPie, stopPie} from "./latency-dev.js";
+export {stopPie};
 const extras = {source_seq:"源包号",server_seq:"缓存包号",packet_bytes:"包字节",queue_depth:"待发包数",
-  reused:"复用连接 (1/0)",empty_reads:"空拉取次数",unconfirmed:"结果未确认",timed_out:"超时",
+  reused:"复用连接 (1/0)",empty_reads:"空拉取次数",unconfirmed:"结果未确认",timed_out:"超时",skipped_playback:"同步跳过播放",
   http_status:"HTTP 状态",source_clock_error_ms:"主持对时半往返 ms",concealed_samples:"累计掩蔽样本",phase:"阶段"};
 const phases = {clock:"对时",connect:"建连",send:"写请求",headers:"等响应头",body:"读请求响应体",
   fetch:"拉取",capture:"采集",output:"写设备",sdk:"媒体 SDK",grant:"申请凭据",upload:"上传",
@@ -32,6 +34,7 @@ function packets(panel) {
   panel.querySelector(".emptyTrace").hidden=visible.length>0;
 }
 export function render(s) {
+  presentPie(s);
   snapshot=s;
   let panel=document.getElementById("devTiming");
   if (!panel) {

@@ -4,6 +4,7 @@ from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 import time
 import math
+import secrets
 
 # Detailed fields are accepted only by the development server. Units for stage
 # durations are milliseconds; packet identifiers are scoped to one host stream.
@@ -24,7 +25,7 @@ STAGES = {
     "buffer_ms": "接收缓冲", "rtt_ms": "媒体 RTT", "playout_ms": "估算 · 采集至播放",
 }
 COUNTERS = {"source_seq", "server_seq", "packet_bytes", "queue_depth", "reused", "empty_reads",
-            "unconfirmed", "timed_out", "http_status", "concealed_samples", "source_clock_error_ms"}
+            "unconfirmed", "timed_out", "http_status", "concealed_samples", "source_clock_error_ms", "skipped_playback"}
 PHASES = {"clock", "connect", "send", "headers", "body", "fetch", "capture", "output", "sdk", "grant",
           "upload", "decode", "manual", "auto", "history", "publish_track", "subscribe"}
 
@@ -55,6 +56,7 @@ class Member:
     ended_stream: str = ""
     ended_at: float = -math.inf
     fault_ids: deque = field(default_factory=lambda: deque(maxlen=24))
+    peer_id: str = field(default_factory=lambda: secrets.token_hex(6))
 
 
 def client_type(agent):
@@ -68,6 +70,7 @@ def client_type(agent):
 class Monitor:
     def __init__(self, development=False):
         self.development = development
+        self.round_id = None
         self.service_pending = deque(maxlen=100)
         self.service_last = {}
         self.recent_ingest = OrderedDict()
@@ -90,7 +93,7 @@ class Monitor:
         if level == "off":
             self.events.clear()
 
-    def record(self, member, data, host):
+    def record(self, member, data, host, *, is_host=False):
         now = time.monotonic()
         event = data.get("event")
         stream = data.get("stream")
@@ -121,6 +124,8 @@ class Monitor:
             member.fault_ids.append((stream, report_id))
         entry = dict(time=int(time.time()), name=member.name, client=member.client,
                      session=stream[:8], event=event, transport=data["transport"])
+        if self.development and current:
+            entry.update(peer=member.peer_id, round_id=self.round_id, role="host" if is_host else "listener")
         if self.development and (detail := clean_detail(data.get("detail"))):
             if fault and detail.get("unconfirmed") and "source_seq" in detail:
                 receipt = self.recent_ingest.get((stream, detail["source_seq"]))
@@ -208,6 +213,10 @@ class Monitor:
         # Each point spans five completed seconds. Assign wall-clock labels
         # at read time so NTP adjustments cannot shift the underlying counters.
         end = int(now)
+        opus_enabled = bool(room.media.traffic.url or room.media.enabled)
+        rtp_seconds, totals, meter = (), (0, 0), None
+        if opus_enabled:
+            end, rtp_seconds, totals, meter = room.media.traffic.snapshot(now)
         wall = time.time()
         while self.samples and self.samples[-1]["time"] < wall - 600:
             self.samples.pop()
@@ -216,13 +225,24 @@ class Monitor:
             if start + 5 <= self.started:
                 continue
             incoming = outgoing = 0
+            opus_rx = opus_tx = 0
+            measured = True
             for sec in range(start, start + 5):
                 row = self.seconds[sec % len(self.seconds)]
                 if row is not None and row[0] == sec:
                     incoming += row[1]
                     outgoing += row[2]
+                if opus_enabled:
+                    sample = rtp_seconds[sec % len(rtp_seconds)]
+                    if sample is None or sample[0] != sec:
+                        measured = False
+                    else:
+                        opus_rx += sample[1]
+                        opus_tx += sample[2]
             points.append(dict(time=int(wall - (now - start - 5)),
-                               rx_bps=incoming * 8 / 5, tx_bps=outgoing * 8 / 5))
+                               rx_bps=incoming * 8 / 5, tx_bps=outgoing * 8 / 5,
+                               opus_rx_bps=opus_rx * 8 / 5 if measured else None,
+                               opus_tx_bps=opus_tx * 8 / 5 if measured else None))
 
         host = room.host
         members = []
@@ -240,7 +260,16 @@ class Monitor:
             stream = {k: host[k] for k in ("name", "source", "rate", "bits")}
             stream.update(codec=host["codec"], age_s=int(now - room.stage_since), sequence=room.history.sequence,
                           last_audio_s=None if room.last_audio is None else round(now - room.last_audio, 1))
+        audio = {"opus_enabled": opus_enabled}
+        for i, (direction, pcm) in enumerate((("rx", self.uploaded), ("tx", self.downloaded))):
+            recent = points[-2:]
+            field = direction + "_bps"
+            ready = not opus_enabled or (len(recent) == 2 and totals is not None and
+                                         all(p["opus_"+field] is not None for p in recent))
+            audio[field] = sum(p[field]+p["opus_"+field] for p in recent)/2 if ready else None
+            audio[direction] = pcm + totals[i] if totals is not None else None
         return dict(time=int(wall), uptime_s=int(now - self.started), capacity=capacity, lease_s=room.lease_s,
+                    audio_traffic=audio, sfu=meter,
                     members=members, pulling=pulling, pending=len(room.pending), host=stream,
                     buffer_blocks=len(room.history.blocks), history_s=room.history.seconds, samples=list(self.samples),
                     rx=self.uploaded, tx=self.downloaded, uploads=self.uploads, downloads=self.downloads,

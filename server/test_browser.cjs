@@ -312,6 +312,10 @@ async function run() {
         if (development) {
           assert.ok(samples.some(s=>s.event==="publish" && s.detail?.queue_ms>=0 && s.detail.server_seq>0));
           assert.ok(samples.some(s=>s.event==="play" && s.detail?.decode_ms>=0 && s.detail.source_seq>0));
+          const {summarizeLatency} = await import("./web/ops/latency-dev.js");
+          const traced = samples.map(s=>({...s,time:1,peer:"test",role:s.event==="publish"?"host":"listener"})).reverse();
+          const pie = summarizeLatency(traced,"path","pcm","");
+          assert.ok(pie.count>0 && pie.total>0 && pie.parts.play>0,"实际排播包应形成完整延迟分解");
         } else {
           assert.ok(samples.every(s=>!("detail" in s)));
         }

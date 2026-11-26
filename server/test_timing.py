@@ -23,9 +23,9 @@ class TimingCase(unittest.TestCase):
         self.assertEqual(room["config"].get("dev_timing"), True if self.app.development else None)
         return room["host"]["stream"]
 
-    def asset(self):
+    def asset(self, name="timing-dev.js"):
         with closing(self.alice.connection()) as conn:
-            conn.request("GET", "/ops/timing-dev.js")
+            conn.request("GET", "/ops/"+name)
             with conn.getresponse() as response:
                 return response.status
 
@@ -35,6 +35,7 @@ class ReleaseTiming(TimingCase):
         stream = self.start()
         self.assertEqual(self.ops("overview")[1]["service"]["active"]["logging"], "debug")
         self.assertEqual(self.asset(), 404)
+        self.assertEqual(self.asset("latency-dev.js"), 404)
         path = f"audio?stream={stream}&packet=11"
         self.assertEqual(self.alice.request(path, bytes(120)), {})
         headers = self.bob.request(path+"&trace=1", metadata=True)[2]
@@ -44,6 +45,7 @@ class ReleaseTiming(TimingCase):
         overview = self.ops("overview")[1]
         self.assertNotIn("timing", overview)
         self.assertNotIn("detail", overview["samples"][0])
+        self.assertNotIn("peer", overview["samples"][0])
         self.assertEqual(overview["samples"][0]["upload_ms"], 40)
         self.assertNotIn("detail", App(self.db).room.monitor.samples[0])
         with closing(sqlite3.connect(self.db)) as conn:
@@ -57,6 +59,7 @@ class DevelopmentTiming(TimingCase):
     def test_development_correlates_packets_and_late_timeout(self):
         stream = self.start()
         self.assertEqual(self.asset(), 200)
+        self.assertEqual(self.asset("latency-dev.js"), 200)
         now = round(time.time()*1000)
         path = f"audio?stream={stream}&packet=11&sent={now}&captured={now-200}"
         self.assertEqual(self.alice.request(path, bytes(120)), {"server_seq":1})
@@ -74,6 +77,8 @@ class DevelopmentTiming(TimingCase):
         self.assertEqual({s["event"] for s in snap["samples"]}, {"ingest","play"})
         self.assertNotIn("token", snap["samples"][0]["detail"])
         self.assertNotIn("queue_ms", snap["samples"][0]["detail"])
+        self.assertEqual(snap["samples"][0]["round_id"], snap["timing"]["round_id"])
+        self.assertEqual(snap["samples"][0]["role"], "listener")
 
         self.ops("service/logging", {"logging":"errors"})
         self.alice.request(f"audio?stream={stream}&packet=12", bytes(120))

@@ -113,11 +113,13 @@ class Listening {
     else $("latency").textContent = metrics.buffer_ms == null ? "等待延迟样本" : "接收缓冲 " + Math.round(metrics.buffer_ms) + " ms";
     if (lag > 1000) $("latency").textContent += " · 延迟偏高，可手动同步";
     const detail=metrics.detail, late=detail?.late_ms>0;
+    const resync = lag >= room.config.history_s * 1000 || prefs.auto && lag > autoSyncDelayMs && now-this.lastCheck >= prefs.interval*1000;
+    if (detail && resync && this.transport==="pcm" && this.queued.size) detail.skipped_playback=1;
     if (late || (detail?.source_seq != null ? detail.source_seq%10===1 : now-this.reported >= 2000)) {
       diagnostics(this.host, late ? "gap" : "play", this.transport, metrics);
       this.reported = now;
     }
-    if (lag >= room.config.history_s * 1000 || prefs.auto && lag > autoSyncDelayMs && now-this.lastCheck >= prefs.interval*1000) {
+    if (resync) {
       this.lastCheck = now;
       return true;
     }
@@ -189,12 +191,13 @@ class Listening {
       if (trace) this.pendingTiming = {phase:"body",start:bodyStart};
       const view = new DataView(await response.arrayBuffer()), decodeStart=performance.now();
       if (trace) {
+        const receivedAt = Date.now();
         Object.assign(detail, JSON.parse(response.headers.get("X-Audimate-Timing") || "{}"),
           {server_seq:Number(response.headers.get("X-Sequence")),fetch_headers_ms:bodyStart-start, body_ms:decodeStart-bodyStart,
            fetch_ms:decodeStart-start, empty_reads:emptyReads, poll_ms:emptySince==null ? 0 : start-emptySince});
         const served = response.headers.get("X-Audimate-Served-Ms");
         if (served && clockOffset != null) {
-          const delay=Date.now()+clockOffset-Number(served);
+          const delay=receivedAt+clockOffset-Number(served);
           if (delay>=0 && delay<=60000) detail.downlink_est_ms=delay;
         }
         this.pendingTiming = {phase:"decode",start:decodeStart};
@@ -229,7 +232,10 @@ class Listening {
         next=ctx.currentTime+Math.max(0.025,(600-(age ?? mediaAge))/1000);
       }
       const metrics = {buffer_ms: (next-ctx.currentTime)*1000, underruns:this.underruns};
-      if (trace) metrics.detail = detail;
+      if (trace) {
+        detail.play_queue_ms = metrics.buffer_ms;
+        metrics.detail = detail;
+      }
       metrics.timeline_ms=mediaAge+metrics.buffer_ms;
       if (age != null) Object.assign(metrics,{playout_ms:Math.max(0,age+metrics.buffer_ms), clock_error_ms:clockError});
       this.pendingTiming=null;

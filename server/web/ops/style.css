@@ -94,7 +94,18 @@ time { color: var(--muted); }
 .controls input,.controls select {font:inherit;border:1px solid #9baabd;padding:7px;background:white;color:#182744;max-width:100%}
 .controls button {min-height:36px}
 #controls output,#accountResult {color:#344bb5}
-#sfuTraffic {margin:9px 0 12px;font-variant-numeric:tabular-nums}
+.chartFilters {display:flex;align-items:center;flex-wrap:wrap;gap:8px 14px;margin-top:13px;font-size:13px;color:var(--muted)}
+.chartFilters small {margin-left:auto}
+#trafficLegend {flex-wrap:wrap;gap:5px 15px;font-variant-numeric:tabular-nums}
+.lineKey {display:inline-block;width:20px;vertical-align:middle;margin-right:5px;border-top:3px solid;background:transparent}
+.lineKey.tx {border-top-style:dashed}
+#latencyPie {margin-top:15px}
+.pieStatus {font-weight:600;margin-top:14px;font-variant-numeric:tabular-nums}
+.pieAux {font-size:13px;color:var(--muted)}
+.pieResult {display:grid;grid-template-columns:172px minmax(0,480px);gap:clamp(16px,4vw,46px);align-items:center;margin-top:12px}
+.pieResult canvas {width:172px;height:172px}
+.pieResult th:not(:first-child),.pieResult td:not(:first-child) {text-align:right}
+@media (max-width:600px) {.pieResult {grid-template-columns:minmax(0,1fr)} .pieResult canvas {justify-self:center}}
 #telemetry td {font-variant-numeric:tabular-nums}
 #telemetry .scroll {max-height:360px;overflow:auto}
 #audit {max-height:170px;overflow:auto;padding-inline-start:20px}

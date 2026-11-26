@@ -16,6 +16,7 @@ function displayBytes(n) {
 }
 
 function rate(n) {
+  if (!Number.isFinite(n)) return "—";
   if (n >= 1e6) return (n / 1e6).toFixed(2) + " Mbps";
   if (n >= 1000) return (n / 1000).toFixed(1) + " kbps";
   return Math.round(n) + " bps";
@@ -59,6 +60,7 @@ function showLogin(message) {
   clearTimeout(timer);
   controller?.abort();
   latest = null;
+  timingView?.then(view=>{ if (!latest) view.stopPie(); }).catch(()=>{});
   byId("dashboard").hidden = true;
   document.querySelector("nav").hidden = document.querySelector(".operator").hidden = true;
   byId("auth").hidden = false;
@@ -67,6 +69,13 @@ function showLogin(message) {
   byId("password").value = "";
 }
 
+const trafficSeries = [
+  {codec:"pcm", direction:"rx", key:"rx_bps", label:"PCM 入站", color:"#146552"},
+  {codec:"pcm", direction:"tx", key:"tx_bps", label:"PCM 出站", color:"#397b98"},
+  {codec:"opus", direction:"rx", key:"opus_rx_bps", label:"Opus 入站", color:"#855095"},
+  {codec:"opus", direction:"tx", key:"opus_tx_bps", label:"Opus 出站", color:"#a35d16"},
+];
+byId("trafficDirection").onchange = byId("trafficCodec").onchange = plot;
 function plot() {
   if (!latest) return;
   const canvas = byId("chart");
@@ -79,7 +88,18 @@ function plot() {
   const ctx = canvas.getContext("2d");
   ctx.scale(ratio, ratio);
   const points = latest.history.slice(-range / 5);
-  const peak = Math.max(0, ...points.map(p => Math.max(p.rx_bps, p.tx_bps)));
+  const direction = byId("trafficDirection").value, codec = byId("trafficCodec").value;
+  const series = trafficSeries.filter(s => (!direction || s.direction === direction) && (!codec || s.codec === codec));
+  const values = series.flatMap(s => points.map(p => p[s.key]).filter(Number.isFinite));
+  const peak = Math.max(0, ...values);
+  byId("trafficLegend").replaceChildren(...series.map(s => {
+    const label = node("span", s.label+" "+rate(points.at(-1)?.[s.key]));
+    const line = document.createElement("i");
+    line.className = "lineKey "+s.direction;
+    line.style.borderColor = s.color;
+    label.prepend(line);
+    return label;
+  }));
   const maxMbps = peak ? Math.ceil(peak / 1e5) / 10 : 1;
   const left = 42, right = width - 8, top = 12, bottom = height - 23;
   const startTime = latest.time - range;
@@ -97,22 +117,26 @@ function plot() {
   }
   for (const [timestamp, align] of [[startTime, "left"], [startTime + range / 2, "center"], [latest.time, "right"]]) {
     ctx.textAlign = align;
-    ctx.fillText(clock(timestamp).slice(0, 5), x(timestamp), height - 3);
+    ctx.fillText(range===60 ? clock(timestamp) : clock(timestamp).slice(0, 5), x(timestamp), height - 3);
   }
-  for (const [field, color, dashes] of [["rx_bps", "#146552", []], ["tx_bps", "#4266b1", [5, 3]]]) {
+  for (const s of series) {
     ctx.beginPath();
     ctx.lineWidth = 2;
-    ctx.strokeStyle = color;
-    ctx.setLineDash(dashes);
-    points.forEach((p, i) => {
-      const y = bottom - (p[field] / 1e6 / maxMbps) * (bottom - top);
-      if (i) ctx.lineTo(x(p.time), y);
+    ctx.strokeStyle = s.color;
+    ctx.setLineDash(s.direction === "tx" ? [5,3] : []);
+    let connected = false;
+    for (const p of points) {
+      if (!Number.isFinite(p[s.key])) { connected = false; continue; }
+      const y = bottom - (p[s.key] / 1e6 / maxMbps) * (bottom - top);
+      if (connected) ctx.lineTo(x(p.time), y);
       else ctx.moveTo(x(p.time), y);
-    });
+      connected = true;
+    }
     ctx.stroke();
   }
   canvas.setAttribute("aria-label", "最近 " + range / 60 + " 分钟，音频峰值 " + rate(peak));
   byId("emptyPlot").hidden = peak > 0;
+  byId("emptyPlot").textContent = values.length ? "所选时段暂无音频传输" : "等待所选流量的采样";
 }
 
 function events() {
@@ -142,8 +166,10 @@ function render(s) {
   byId("capacity").textContent = s.pending + " 个待处理主持申请";
   byId("pulling").textContent = s.pulling;
   for (const field of ["rx", "tx"]) {
-    byId(field + "Rate").textContent = rate(s[field + "_bps"]);
-    byId(field + "Total").textContent = "近 10 秒均速 · 累计 " + displayBytes(s[field]);
+    const audio = s.audio_traffic;
+    byId(field + "Rate").textContent = rate(audio[field + "_bps"]);
+    byId(field + "Total").textContent = audio[field] == null ? "Opus 指标缺测 · PCM 已计 "+displayBytes(s[field]) :
+      "近 10 秒均速 · 累计 " + displayBytes(audio[field]);
   }
   const host = s.host;
   const flowing = host && host.last_audio_s !== null;
@@ -250,9 +276,6 @@ let timingView;
 const ms = value => Number.isFinite(value) ? Math.round(value) + " ms" : "—";
 function renderControl(s) {
   const {maintenance,restarting,active,pending,audit} = s.service;
-  const meter=s.sfu;
-  byId("sfuTraffic").textContent=meter ? "LiveKit RTP　入站 "+displayBytes(meter.incoming)+" / 出站 "+displayBytes(meter.outgoing)
-      + (meter.rx_bps==null?"":"　当前 "+rate(meter.rx_bps)+" / "+rate(meter.tx_bps)) : "LiveKit RTP　等待 SFU 指标";
   byId("serviceState").textContent = restarting ? "正在重启媒体服务" : maintenance ? "维护中" : "已开放";
   byId("activeConfig").textContent = "生效缓存 " + active.history_s + " 秒 · 校准档位 " + active.intervals.join(" / ") + " 秒 · 成员离线超时 " + active.lease_s + " 秒";
   const signature=JSON.stringify([pending,active.logging]);
@@ -281,6 +304,7 @@ function renderControl(s) {
     timingView.then(view => { if (latest === s) view.render(s); }).catch(() => { timingView = null; });
   } else {
     byId("devTiming")?.remove();
+    timingView?.then(view=>{ if (latest===s) view.stopPie(); }).catch(()=>{});
   }
 }
 async function manage(action,data={}) {

@@ -71,13 +71,15 @@ python3 ops_admin.py --db /var/lib/audimate/accounts.sqlite3 revoke existing-use
 | 后台指标 | 统计口径及排障用途 |
 | --- | --- |
 | 在线连接、正在拉流 | 在线按房间会话计数，超过当前「成员离线超时」未联系即释放席位，默认 20 秒。近 7 秒请求缓存或上报播放样本的听众计入正在拉流。可结合成员列表区分空闲、等待音频和主持申请。 |
-| 入站、出站 | 入站是服务端已接受的 PCM 字节，出站是服务端为各次成功读取返回的 PCM 字节；重复读取再次计入出站。HTTP/TLS 开销和网卡其他流量不计入。每个连接显示其入房后的上传与下载。 |
-| 速率与趋势 | 速率取最近 10 个完整秒的平均值。图中每个点覆盖 5 秒，可选 1、5、10 分钟。空房时曲线自然回落。 |
+| 音频总入站、总出站 | 每个方向合计已传输的 PCM HTTP 音频字节和 LiveKit RTP 字节，包含同机转码桥接。PCM 重复拉取也计入出站。成员表仍按会话统计 PCM。公网网卡和 HTTP/TLS 开销属于不同的计量口径。 |
+| 速率与趋势 | 顶部为同一时间窗内的 10 秒均速。图中每点覆盖 5 秒，可查看最近 1、5、10 分钟。方向和格式可交叉筛选四条线，例如只看 Opus 出站。筛选仅影响趋势。 |
 | 音源与缓冲 | 可以查看主持、采样率、位深、当前流的最新序号和缓冲占用。有主持且超过 3 秒未收到音频时提示上行无新包。 |
 | 空读与游标跳过 | 空读表示有效的拉流请求暂时没有新块。游标跳过块数按有序号的读取请求累计，常见原因是听众读取较慢，旧块已离开服务器缓冲。 |
 | 排障事件 | 最近 100 条连接、超时、上下台、申请、交接和房间接口错误。相邻的同类异常在 5 秒内合并并保留次数。 |
 
 累计值从当前工作进程启动时开始，趋势和事件保存在有界内存中，重启后重新统计。后台只保留调试所需的统计与房间状态。端到端播放成功率、音量及云厂商计费流量需要在对应端另行测量。
+
+服务进程在后台约每 2 秒读取一次 SFU 计数，首次成功读取作为本次累计的基线，相邻读数的增量按时间分摊。SFU 指标中断或重启时，Opus 曲线保留缺口，缺测期间总量栏提示可用的 PCM 计数。未启用 LiveKit 的服务按纯 PCM 展示。
 
 ### 控制与诊断
 
@@ -94,6 +96,10 @@ python3 ops_admin.py --db /var/lib/audimate/accounts.sqlite3 revoke existing-use
 测试站可在维护期间把 `deploy/development-timing.conf` 安装到 `/etc/systemd/system/audimate.service.d/development-timing.conf`，执行 `systemctl daemon-reload` 和 `systemctl restart audimate` 后生效。正式站使用基础单元。
 
 在开发服务登录 `/ops/`，进入「传输时间线 → 开发版链路计时」。展开耗时分布可查看当前主持轮次的样本数、P50、P95 和最大值。空席时显示最近有样本的一轮。输入源包号或缓存包号可对照主持、入库、收听三处的记录。源包号在主持端组包时分配，缓存包号由服务端实际入库后分配，两者可能不同。
+
+「播放延迟构成」使用当前主持轮次的采集至预计播放时间作为 100%。默认汇总同一路径最近 30 秒，窗口可选 10、30、60 秒。运维浏览器每 5 秒只计算当前选中的视图，切换立即重算。路径汇总先取每位听众的平均值，再给每位听众相同权重。指定听众按连接区分，包括同一账号的多台设备。最慢听众按每位听众当前路径的最新有效端到端延迟选出，再展示该听众在窗口内同一路径的构成。
+
+组包和待发队列按同一轮次、源包号和缓存包号关联。上传估算扣除服务入库耗时，ACK 往返和缓存位置等重叠指标保留在明细中。饼图单列缓存驻留、下行、解码、排播等待及未归因时间。缺少可靠端到端样本时显示提示及可用的 RTT、抖动、接收缓冲；超过 2 ms 取整容差的总量冲突单独计数。正式服务不提供饼图模块。
 
 | 路径 | 记录内容 |
 | --- | --- |
@@ -131,7 +137,8 @@ python3 ops_admin.py --db /var/lib/audimate/accounts.sqlite3 revoke existing-use
 在仓库根目录运行。桌面用例需要 Windows、Tk 和已构建的 x64 采音 DLL。浏览器用例需要 Node.js、Playwright 和 Chromium，可用 `CHROME_BIN` 和 `AUDIMATE_PYTHON` 指定可执行文件。
 
 ```powershell
-python -m unittest server.test_app server.test_runtime server.test_timing client.test_online client.test_client -v
+python -m unittest server.test_app server.test_runtime server.test_timing server.test_traffic client.test_online client.test_client -v
+node server/test_latency.cjs
 node server/test_browser.cjs
 node server/test_browser.cjs --release
 node server/test_ops_browser.cjs

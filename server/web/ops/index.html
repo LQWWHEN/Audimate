@@ -12,7 +12,7 @@
   <header><div class="bar">
     <div class="brand"><i aria-hidden="true"><b></b><b></b><b></b><b></b></i>Audimate</div>
     <span class="brand-section">运维</span>
-    <nav hidden><a href="#overview">总览</a><a href="#connections">连接</a><a href="#telemetry">延迟</a><a href="#events">事件</a><a href="#controls">服务控制</a></nav>
+    <nav hidden><a href="#overview">总览</a><a href="#connections">连接</a><a id="delayNav" href="#telemetry">延迟</a><a href="#events">事件</a><a href="#controls">服务控制</a></nav>
     <div class="operator" hidden><span id="operator"></span><button id="logout">退出</button></div>
   </div></header>
   <main>
@@ -32,14 +32,16 @@
         <div class="kpis">
           <article><h2>在线连接</h2><strong id="online">—</strong><small id="capacity"></small></article>
           <article><h2>正在拉流</h2><strong id="pulling">—</strong><small>近 7 秒有收听活动的会话</small></article>
-          <article><h2><i class="dot rx"></i>PCM 入站</h2><strong id="rxRate">—</strong><small id="rxTotal"></small></article>
-          <article><h2><i class="dot tx"></i>PCM 出站</h2><strong id="txRate">—</strong><small id="txTotal"></small></article>
+          <article><h2><i class="dot rx"></i>音频总入站</h2><strong id="rxRate">—</strong><small id="rxTotal"></small></article>
+          <article><h2><i class="dot tx"></i>音频总出站</h2><strong id="txRate">—</strong><small id="txTotal"></small></article>
         </div>
-        <p id="sfuTraffic"></p>
         <div class="grid">
-          <section class="card"><div class="card-head"><h2>PCM 传输趋势</h2>
+          <section class="card"><div class="card-head"><h2>音频传输趋势</h2>
             <div id="range" aria-label="趋势时间范围"><button data-range="60">1 分钟</button><button data-range="300" aria-pressed="true">5 分钟</button><button data-range="600">10 分钟</button></div></div>
-            <div class="legend"><span><i class="dot rx"></i>入站</span><span><i class="dot tx"></i>出站</span><small>Mbps · 每 5 秒</small></div>
+            <div class="chartFilters"><label>方向 <select id="trafficDirection"><option value="">全部</option><option value="rx">入站</option><option value="tx">出站</option></select></label>
+              <label>格式 <select id="trafficCodec"><option value="">全部</option><option value="pcm">PCM</option><option value="opus">Opus</option></select></label>
+              <small>Mbps · 每 5 秒</small></div>
+            <div class="legend" id="trafficLegend"></div>
             <div class="plot"><canvas id="chart" role="img" aria-label="房间音频入站与出站速率趋势"></canvas><small id="emptyPlot" hidden>所选时段暂无音频传输</small></div>
           </section>
           <section class="card"><div class="card-head"><h2>主持与音源</h2><span id="streamState" class="pill"></span></div>

@@ -3,6 +3,7 @@
 const assert = require("node:assert/strict");
 const { execFileSync, spawn } = require("node:child_process");
 const { once } = require("node:events");
+const { createServer } = require("node:http");
 const { mkdtemp, rm } = require("node:fs/promises");
 const { tmpdir } = require("node:os");
 const path = require("node:path");
@@ -11,7 +12,8 @@ const { chromium } = require("playwright");
 async function run() {
   const folder = await mkdtemp(path.join(tmpdir(), "audimate-monitor-"));
   const python = process.env.AUDIMATE_PYTHON || "python";
-  let url = process.env.AUDIMATE_TEST_URL, service, browser, host, listener, stream;
+  let url = process.env.AUDIMATE_TEST_URL, service, browser, host, listener, stream, exporter;
+  let rtpRx=9000, rtpTx=15000;
   async function post(client, route, data) {
     const response = await client.post(url + route, {data});
     assert.equal(response.status(), 200, route + " 返回 " + response.status());
@@ -26,7 +28,12 @@ async function run() {
       credentials = Buffer.concat(input).toString("utf8");
     } else {
       const db = path.join(folder, "test.sqlite3");
-      service = spawn(python, ["-m", "server.dev", "--port", "0", "--db", db], {windowsHide: true});
+      exporter=createServer((_,res)=>res.end('livekit_packet_bytes{direction="incoming"} '+rtpRx+'\n'+
+        'livekit_packet_bytes{direction="outgoing"} '+rtpTx+'\n'));
+      exporter.listen(0,"127.0.0.1");
+      await once(exporter,"listening");
+      service = spawn(python, ["-m", "server.dev", "--port", "0", "--db", db], {windowsHide: true,
+        env:{...process.env,LIVEKIT_STATS_URL:"http://127.0.0.1:"+exporter.address().port+"/metrics"}});
       const [line] = await once(service.stdout, "data");
       url = line.toString().trim();
       credentials = execFileSync(python, ["-m", "server.ops_admin", "--db", db, "create", "ops_test"],
@@ -69,8 +76,10 @@ async function run() {
       assert.ok(pcm.equals(await data.body()));
     }
     if (service) {
+      rtpRx+=8000; rtpTx+=16000;
       await post(listener,"/api/diagnostics",{stream,event:"play",transport:"pcm",playout_ms:642.5,clock_error_ms:8.2,buffer_ms:200,
-        detail:{source_seq:1,server_seq:1,decode_ms:4.25}});
+        detail:{source_seq:1,server_seq:1,decode_ms:4.25,ingest_ms:5,uplink_est_ms:35,residence_ms:240,
+          downlink_est_ms:25,play_queue_ms:200}});
       await page.waitForFunction(()=>document.querySelector("#p95").textContent.includes("643 ms"));
       await page.waitForFunction(()=>document.querySelector("#devTiming .stageRows")?.textContent.includes("PCM 解码"));
       await page.fill("#devTiming input", "1");
@@ -78,6 +87,32 @@ async function run() {
       await page.fill("#devTiming input", "999");
       await page.waitForSelector(".emptyTrace:visible");
       await page.fill("#devTiming input", "");
+      await page.waitForFunction(()=>document.querySelector(".pieStatus")?.textContent.includes("1 个有效包"));
+      await page.selectOption("#pieView","peer");
+      assert.ok(await page.isVisible("#piePeer"));
+      await page.selectOption("#pieView","slowest");
+      assert.ok((await page.textContent(".pieStatus")).includes(name));
+      await page.selectOption("#pieView","path");
+      await page.selectOption("#piePath","rtc");
+      assert.ok((await page.textContent(".pieStatus")).includes("样本不足"));
+      await page.selectOption("#piePath","pcm");
+      await page.selectOption("#pieWindow","60");
+      await page.waitForFunction(()=>latest.audio_traffic.rx_bps!=null && latest.audio_traffic.rx===123200,
+        null,{timeout:18000}).catch(async error=>{
+          const s=await snapshot();
+          throw Error(error.message+" "+JSON.stringify({audio:s.audio_traffic,meter:s.sfu,history:s.history.slice(-2)}));
+        });
+      assert.equal((await snapshot()).audio_traffic.tx,131200);
+      await page.selectOption("#trafficCodec","opus");
+      await page.selectOption("#trafficDirection","tx");
+      assert.match(await page.textContent("#trafficLegend"),/^Opus 出站/);
+      assert.equal(await page.locator("#trafficLegend span").count(),1);
+      assert.match(await page.textContent("#rxTotal"),/120.3 KiB/);
+      await page.selectOption("#trafficCodec","");
+      await page.selectOption("#trafficDirection","");
+      assert.equal(await page.locator("#trafficLegend span").count(),4);
+      await listener.get(url+"/api/room?listen="+stream);
+      await host.get(url+"/api/room");
     }
     const current = await snapshot();
     assert.equal(current.members.length, 2);
@@ -136,7 +171,8 @@ async function run() {
       service.kill();
       await stopped;
     }
+    if (exporter) await new Promise(resolve=>exporter.close(resolve));
     await rm(folder, {recursive: true, force: true});
   }
 }
-run().catch(error => { console.error(error.message); process.exitCode = 1; });
+run().catch(error => { console.error(error.stack); process.exitCode = 1; });

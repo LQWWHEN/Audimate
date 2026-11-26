@@ -155,6 +155,8 @@ class Room:
     def grant(self, key, choice):
         self.reset()
         self.host = dict(choice, key=key, stream=secrets.token_hex(12), track=None)
+        if self.monitor.development:
+            self.monitor.round_id = secrets.token_hex(12)
         self.stage_since = time.monotonic()
         self.start_watcher()
         if choice["codec"] == "opus":
@@ -260,6 +262,9 @@ class App:
             rows = conn.execute(f"SELECT sample FROM {self.log_table} ORDER BY id DESC LIMIT 600")
             self.room.monitor.samples.extend(json.loads(row[0]) for row in rows)
             conn.commit()
+        meter = self.room.media.traffic
+        if meter.url:
+            threading.Thread(target=meter.collect, name="sfu-traffic", daemon=True).start()
 
     def flush_samples(self, rows, epoch=None):
         try:
@@ -327,7 +332,8 @@ class App:
                        "/ops/style.css": "ops/style.css", "/ops/dashboard.js": "ops/dashboard.js"})
         if self.development:
             assets["/ops/timing-dev.js"] = "ops/timing-dev.js"
-        elif path == "/ops/timing-dev.js":
+            assets["/ops/latency-dev.js"] = "ops/latency-dev.js"
+        elif path in ("/ops/timing-dev.js", "/ops/latency-dev.js"):
             raise Problem(404, "资源不存在")
         if path in assets and method == "GET":
             file = WEB / assets[path]
@@ -404,9 +410,9 @@ class App:
                     if self.development:
                         stream = self.room.host["stream"][:8] if self.room.host else next((r["session"] for r in snapshot["samples"]), "")
                         snapshot["timing"] = self.room.monitor.stage_summary(stream)
+                        snapshot["timing"]["round_id"] = self.room.monitor.round_id if self.room.host else None
                     snapshot["service"] = self.control.snapshot(conn)
                     snapshot["livekit"] = self.room.media.enabled
-                    snapshot["sfu"] = self.room.media.statistics()
                     snapshot["operator"] = user[0]
                     return 200, encoded(snapshot), []
         query = parse_qs(env.get("QUERY_STRING", ""))
@@ -448,7 +454,7 @@ class App:
             if media_request:
                 host = room.host
                 if path == "/api/diagnostics":
-                    sample = room.monitor.record(room.members[key], data, host)
+                    sample = room.monitor.record(room.members[key], data, host, is_host=bool(host and key == host["key"]))
                     if sample:
                         if self.development:
                             room.monitor.service_pending.append(sample)

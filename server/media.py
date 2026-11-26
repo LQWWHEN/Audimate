@@ -7,12 +7,16 @@ import hmac
 import json
 import logging
 import os
-import re
 import threading
 import time
 from urllib.request import Request, urlopen
 
 log = logging.getLogger("audimate.media")
+
+if __package__:
+    from .traffic import RtpTraffic
+else:
+    from traffic import RtpTraffic
 
 
 class History:
@@ -63,40 +67,7 @@ class Media:
         self.enabled = bool(self.url and self.key and self.secret)
         self.loop = None
         self.bridge = None
-        self.stats_url = os.environ.get("LIVEKIT_STATS_URL")
-        self.stats = None
-        self.sample_time = 0
-        self.sampling = False
-
-    def statistics(self):
-        # Called under the room lock. HTTP collection never blocks audio or authentication.
-        if self.stats_url and not self.sampling and time.monotonic()-self.sample_time >= 2:
-            self.sampling = True
-            threading.Thread(target=self._sample, daemon=True).start()
-        return self.stats
-
-    def _sample(self):
-        try:
-            with urlopen(self.stats_url, timeout=1.5) as response:
-                lines = response.read(2_000_000).decode().splitlines()
-            totals = {"incoming": 0, "outgoing": 0}
-            for line in lines:
-                if line.startswith("livekit_packet_bytes{"):
-                    direction = re.search(r'direction="(incoming|outgoing)"', line)
-                    if direction:
-                        totals[direction[1]] += int(float(line.rsplit(" ",1)[1]))
-            now = time.monotonic()
-            previous = self.stats
-            self.stats = dict(totals, time=int(time.time()), rx_bps=None, tx_bps=None)
-            if previous and now-self.sample_time < 15:
-                for direction, key in (("incoming","rx_bps"),("outgoing","tx_bps")):
-                    if totals[direction] >= previous[direction]:
-                        self.stats[key] = (totals[direction]-previous[direction])*8/(now-self.sample_time)
-        except (ValueError, OSError):
-            self.stats = None
-        finally:
-            self.sample_time = time.monotonic()
-            self.sampling = False
+        self.traffic = RtpTraffic(os.environ.get("LIVEKIT_STATS_URL"))
 
     def token(self, stream, identity, *, publish=False, subscribe=False, admin=False):
         now = int(time.time())
