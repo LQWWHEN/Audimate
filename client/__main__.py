@@ -24,6 +24,7 @@ class Client:
         self.root, self.dll = root, dll
         self.worker = None
         self.closing = False
+        self.online = None
         self.error_text = ""
         self.sources = []
         self.rows = {}
@@ -57,6 +58,7 @@ class Client:
         tk.Label(bar, text="本地房间", fg="#b6c7c8", bg=INK, font=(FONT, 10)).pack(side="left", padx=14)
         self.role = tk.Label(bar, text="听众", fg="#a8e2d7", bg=INK, font=(FONT, 11))
         self.role.pack(side="right")
+        ttk.Button(bar, text="连接在线房间", command=self.open_online).pack(side="right", padx=12)
 
         self.settings = ttk.Frame(root, padding=(24, 18))
         self.settings.grid(row=1, column=0, sticky="nsew")
@@ -245,8 +247,17 @@ class Client:
             self.error_text = f"采音已结束，请刷新或重新选择。{worker.error}"
             self.validate()
 
+    def open_online(self):
+        if self.online:
+            self.online.window.lift()
+            return
+        from .online import OnlineRoom
+        self.online = OnlineRoom(self)
+
     def close(self):
         self.closing = True
+        if self.online:
+            self.online.close()
         if self.worker:
             self.worker.cancel.set()
             self.root.withdraw()

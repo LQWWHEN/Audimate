@@ -1,0 +1,20 @@
+[Unit]
+Description=Audimate music room
+After=network.target
+
+[Service]
+DynamicUser=yes
+StateDirectory=audimate
+StateDirectoryMode=0700
+WorkingDirectory=/opt/audimate
+Environment=AUDIMATE_DB=/var/lib/audimate/accounts.sqlite3
+Environment=AUDIMATE_TRUST_PROXY=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/gunicorn --bind 127.0.0.1:17881 --workers 1 --worker-class gthread --threads 8 app:create_app()
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

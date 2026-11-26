@@ -14,10 +14,11 @@ class ShareSelection:
 
 
 class LocalCapture(threading.Thread):
-    def __init__(self, dll, selection):
+    def __init__(self, dll, selection, on_block=None):
         super().__init__(name="Audimate capture consumer")
         self.dll = dll
         self.selection = selection
+        self.on_block = on_block
         self.ready = threading.Event()
         self.cancel = threading.Event()
         self.levels = (0.0, 0.0)
@@ -35,6 +36,8 @@ class LocalCapture(threading.Thread):
                 while not self.cancel.is_set():
                     block = session.read(100)
                     if block is not None:
+                        if self.on_block:
+                            self.on_block(block)
                         samples = block.samples()
                         for channel in range(2):
                             peaks[channel] = max(peaks[channel], max(map(abs, samples[channel::2])))

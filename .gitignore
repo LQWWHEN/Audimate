@@ -5,3 +5,7 @@ __pycache__/
 .env
 .env.*
 !.env.example
+/client/server.local.txt
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm

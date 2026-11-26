@@ -1,0 +1,275 @@
+:root {
+  font:
+    16px/1.55 "Segoe UI",
+    "Microsoft YaHei",
+    sans-serif;
+  color: #172f32;
+  background: #edf3f0;
+  --ink: #163737;
+  --accent: #08685d;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+header {
+  max-width: 1100px;
+  margin: auto;
+  padding: 24px 6%;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+  justify-content: space-between;
+  border-bottom: 1px solid #cbdad4;
+}
+.brand {
+  font:
+    700 1.65rem Georgia,
+    serif;
+  letter-spacing: -1.5px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.brand i {
+  font: normal 1.2rem Georgia;
+  background: var(--ink);
+  color: #c0efd3;
+  border-radius: 9px;
+  padding: 4px 9px;
+}
+main {
+  max-width: 1010px;
+  padding: clamp(28px, 7vw, 84px) 5%;
+  margin: auto;
+}
+button,
+input {
+  font: inherit;
+}
+button {
+  cursor: pointer;
+  border: 0;
+  border-radius: 8px;
+  font-weight: 600;
+  padding: 9px 16px;
+}
+button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid #9a6b14;
+  outline-offset: 3px;
+}
+.primary {
+  background: var(--accent);
+  color: white;
+}
+.quiet {
+  background: transparent;
+  color: var(--accent);
+}
+.light {
+  background: #def6dc;
+  color: var(--ink);
+}
+.login {
+  display: grid;
+  grid-template-columns: 1fr 1.15fr;
+  overflow: hidden;
+  border-radius: 22px;
+  background: #fff;
+  border: 1px solid #ccdad3;
+}
+.cover {
+  position: relative;
+  background: #1b5351;
+  overflow: hidden;
+  min-height: 320px;
+}
+.disc,
+.small-disc {
+  border-radius: 50%;
+  background: repeating-radial-gradient(circle, #1e4647 0 2px, #112a2d 3px 6px);
+  box-shadow: 0 18px 32px #082a2a55;
+}
+.disc {
+  position: absolute;
+  width: 130%;
+  aspect-ratio: 1;
+  top: 16%;
+  left: -43%;
+  display: grid;
+  place-items: center;
+}
+.disc b {
+  width: 34%;
+  height: 34%;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  color: #214440;
+  background: #d7e6a5;
+  font: 3rem Georgia;
+}
+.login form {
+  padding: clamp(22px, 4.5vw, 48px);
+  display: grid;
+  gap: 8px;
+}
+h1,
+h2,
+p {
+  margin: 0;
+}
+h1 {
+  font-size: clamp(1.7rem, 4vw, 2.45rem);
+  letter-spacing: -0.055em;
+}
+label {
+  font-weight: 600;
+}
+.switch {
+  display: flex;
+  margin: 12px 0;
+  gap: 4px;
+  background: #eff3f0;
+  border-radius: 9px;
+  padding: 4px;
+}
+.switch button {
+  flex: 1;
+  background: transparent;
+  color: #50655a;
+}
+.switch button[aria-pressed="true"] {
+  background: white;
+  color: var(--ink);
+  box-shadow: 0 1px 5px #19372f22;
+}
+input {
+  width: 100%;
+  border: 1px solid #afc1b8;
+  border-radius: 7px;
+  padding: 9px;
+  color: var(--ink);
+  margin-bottom: 5px;
+}
+#submit {
+  margin-top: 9px;
+}
+.title,
+.actions,
+#account {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.title {
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.player {
+  padding: clamp(18px, 4vw, 36px);
+  border-radius: 16px;
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  background: #184742;
+  color: white;
+}
+.small-disc {
+  width: 76px;
+  height: 76px;
+  flex: none;
+  border: 18px solid #233c3c;
+  background: #bbd49b;
+}
+.player h2,
+.player p,
+#username,
+.request span {
+  overflow-wrap: anywhere;
+}
+#account {
+  max-width: 100%;
+}
+#logout {
+  flex-shrink: 0;
+}
+.eyebrow,
+.player p {
+  color: #cde1d4;
+}
+.player button {
+  margin-left: auto;
+  white-space: nowrap;
+}
+.actions,
+#requests {
+  margin-top: 18px;
+}
+.request {
+  margin: 8px 0;
+  padding: 12px;
+  background: white;
+  border-radius: 9px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.request span {
+  flex: 1;
+}
+#notice {
+  margin-top: 16px;
+  color: #854918;
+  min-height: 1.5em;
+}
+[hidden] {
+  display: none !important;
+}
+@media (max-width: 600px) {
+  .login {
+    grid-template-columns: 1fr;
+  }
+  .cover {
+    min-height: 90px;
+  }
+  .disc {
+    width: 220px;
+    top: -70px;
+    left: 8%;
+  }
+  .player {
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .small-disc {
+    width: 45px;
+    height: 45px;
+    border-width: 11px;
+  }
+  .player button {
+    margin-left: 0;
+  }
+  .title span {
+    font-size: 0.9rem;
+  }
+}
+.actions {
+  flex-wrap: wrap;
+}
+select {
+  font: inherit;
+  color: var(--ink);
+  padding: 7px;
+  border: 1px solid #afc1b8;
+  border-radius: 7px;
+  background: white;
+}

@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="theme-color" content="#162f32" />
+    <title>Audimate · 音乐房间</title>
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header>
+      <div class="brand"><i aria-hidden="true">♫</i> Audimate</div>
+      <div id="account" hidden>
+        <span id="username"></span
+        ><button id="logout" class="quiet">退出</button>
+      </div>
+    </header>
+    <main>
+      <section id="auth" class="login">
+        <div class="cover" aria-hidden="true">
+          <div class="disc"><b>♪</b></div>
+        </div>
+        <form id="authform">
+          <h1 id="authTitle">登录音乐房间</h1>
+          <div class="switch">
+            <button type="button" id="loginTab" aria-pressed="true">登录</button
+            ><button type="button" id="registerTab" aria-pressed="false">
+              注册
+            </button>
+          </div>
+          <label for="name">用户名</label
+          ><input
+            id="name"
+            autocomplete="username"
+            required
+            minlength="2"
+            maxlength="32"
+          />
+          <label for="password">密码</label
+          ><input
+            id="password"
+            type="password"
+            autocomplete="current-password"
+            required
+            minlength="8"
+            maxlength="128"
+          />
+          <button id="submit" class="primary">登录</button>
+        </form>
+      </section>
+      <section id="room" hidden>
+        <div class="title">
+          <h1>音乐房间</h1>
+          <span id="members"></span>
+        </div>
+        <article class="player">
+          <div class="small-disc" aria-hidden="true"></div>
+          <div>
+            <div class="eyebrow">当前音源</div>
+            <h2 id="source">等待主持上台</h2>
+            <p id="hostInfo"></p>
+          </div>
+          <button id="listen" class="light">收听</button>
+        </article>
+        <div class="actions">
+          <label for="quality">共享音质</label>
+          <select id="quality">
+            <option value="48000/16">标准 · 48 kHz / 16-bit</option>
+            <option value="44100/16">CD · 44.1 kHz / 16-bit</option>
+            <option value="96000/24">录音室 · 96 kHz / 24-bit</option>
+          </select>
+          <button id="stage" class="primary" disabled>主持 · 共享标签页</button
+          ><button id="cancel" class="quiet" hidden>取消申请</button>
+        </div>
+        <div id="requests"></div>
+      </section>
+      <p id="notice" role="status" aria-live="polite"></p>
+    </main>
+  </body>
+</html>
