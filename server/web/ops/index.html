@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#123e37">
+  <title>Audimate · 运维监控</title>
+  <link rel="stylesheet" href="/ops/style.css">
+  <script src="/ops/dashboard.js" defer></script>
+</head>
+<body>
+  <header><div class="bar">
+    <div class="brand"><i aria-hidden="true"><b></b><b></b><b></b><b></b></i>Audimate</div>
+    <span class="brand-section">运维</span>
+    <nav hidden><a href="#overview">总览</a><a href="#connections">连接</a><a href="#events">事件</a></nav>
+    <div class="operator" hidden><span id="operator"></span><button id="logout">退出</button></div>
+  </div></header>
+  <main>
+    <section id="auth" class="auth" hidden>
+      <h1>运维登录</h1><p>使用已获授权的账号查看房间连接与音频流量。</p>
+      <form id="login"><label for="name">账号</label><input id="name" autocomplete="username" required maxlength="32">
+        <label for="password">密码</label><input id="password" type="password" autocomplete="current-password" required maxlength="128">
+        <button class="primary">登录后台</button>
+      </form><p id="error" role="alert"></p>
+    </section>
+    <p id="loading" role="status">正在连接监控服务…</p>
+    <div id="dashboard" hidden>
+      <section id="overview">
+        <div class="headline"><div><h1>房间监控</h1><p id="asof"></p></div>
+          <div class="status"><span class="pill" id="live">同步中</span><button id="refresh">刷新</button></div></div>
+        <p id="warning" role="status" hidden></p>
+        <div class="kpis">
+          <article><h2>在线连接</h2><strong id="online">—</strong><small id="capacity"></small></article>
+          <article><h2>正在拉流</h2><strong id="pulling">—</strong><small>近 3 秒请求音频的听众</small></article>
+          <article><h2><i class="dot rx"></i>音频入站</h2><strong id="rxRate">—</strong><small id="rxTotal"></small></article>
+          <article><h2><i class="dot tx"></i>音频出站</h2><strong id="txRate">—</strong><small id="txTotal"></small></article>
+        </div>
+        <div class="grid">
+          <section class="card"><div class="card-head"><h2>音频传输趋势</h2>
+            <div id="range" aria-label="趋势时间范围"><button data-range="60">1 分钟</button><button data-range="300" aria-pressed="true">5 分钟</button><button data-range="600">10 分钟</button></div></div>
+            <div class="legend"><span><i class="dot rx"></i>入站</span><span><i class="dot tx"></i>出站</span><small>Mbps · 每 5 秒</small></div>
+            <div class="plot"><canvas id="chart" role="img" aria-label="房间音频入站与出站速率趋势"></canvas><small id="emptyPlot" hidden>所选时段暂无音频传输</small></div>
+          </section>
+          <section class="card"><div class="card-head"><h2>主持与音源</h2><span id="streamState" class="pill"></span></div>
+            <h3 id="source"></h3><p id="host"></p><dl id="streamInfo"></dl>
+          </section>
+        </div>
+      </section>
+      <section id="connections" class="card"><div class="card-head"><h2>房间连接</h2><small>按登录会话统计</small></div>
+        <div class="scroll"><table><thead><tr><th>账号</th><th>接入端</th><th>状态</th><th>已连接</th><th>最近联系</th><th>上传</th><th>下载</th></tr></thead><tbody id="members"></tbody></table></div>
+        <p class="empty" id="emptyMembers">当前没有在线连接</p></section>
+      <section id="events" class="card"><div class="card-head"><h2>排障事件</h2><label>筛选 <select id="filter"><option>全部</option><option>连接</option><option>主持</option><option>异常</option><option>服务</option></select></label></div>
+        <div id="diagnostics"></div><ul id="log"></ul><p id="emptyEvents" class="empty" hidden>没有符合条件的事件</p></section>
+    </div>
+  </main>
+</body></html>

@@ -5,12 +5,15 @@ from pathlib import Path
 import sqlite3
 import tempfile
 import threading
+import time
 import unittest
+from unittest.mock import patch
 from wsgiref.simple_server import make_server, WSGIRequestHandler
 
 from client.network import API
 from .app import App, LEASE
 from .dev import ThreadedServer
+from .ops_admin import manage
 
 
 class Quiet(WSGIRequestHandler):
@@ -85,8 +88,7 @@ class Integration(unittest.TestCase):
         self.alice.request("stage/request", self.choice)
         with self.app.room.lock:
             key = self.app.room.host["key"]
-            name, t = self.app.room.members[key]
-            self.app.room.members[key] = name, t - LEASE - 1
+            self.app.room.members[key].seen -= LEASE + 1
         self.assertIsNone(self.bob.request("room")["host"])
 
     def test_web_origin_and_files(self):
@@ -102,3 +104,69 @@ class Integration(unittest.TestCase):
             self.assertEqual(con.getresponse().status, 403)
         finally:
             con.close()
+
+    def test_ops_session_scope_and_role(self):
+        def request(path, cookie="", data=None):
+            con = http.client.HTTPConnection(API(self.url).url.netloc)
+            try:
+                headers = {"Cookie": cookie, "Content-Type": "application/json"}
+                con.request("GET" if data is None else "POST", path,
+                            json.dumps(data) if data is not None else None, headers)
+                resp = con.getresponse()
+                resp.read()
+                return resp.status, resp.getheader("Set-Cookie", "").split(";")[0]
+            finally:
+                con.close()
+
+        path = "/ops/api/overview"
+        login = "/ops/api/login"
+        self.assertEqual(request(path)[0], 401)
+        self.register(self.alice, "Alice")
+        creds = dict(name="Alice", password="local-test-password")
+        self.assertEqual(request(login, data=creds)[0], 403)
+        manage(self.db, "grant", "Alice")
+        self.assertEqual(request(path, self.alice.cookie)[0], 401)
+        code, cookie = request(login, data=creds)
+        self.assertEqual(code, 200)
+        self.assertEqual(request(path, cookie)[0], 200)
+        self.assertEqual(len(self.app.room.members), 0)
+        self.assertEqual(request("/api/room", cookie.replace("audimate_ops=", "audimate="))[0], 401)
+        self.assertEqual(request("/ops/api/logout", cookie, {})[0], 200)
+        self.assertEqual(request(path, cookie)[0], 401)
+        cookie = request(login, data=creds)[1]
+        manage(self.db, "revoke", "Alice")
+        manage(self.db, "grant", "Alice")
+        self.assertEqual(request(path, cookie)[0], 401)
+        self.assertEqual(self.alice.request("me")["name"], "Alice")
+
+    def test_ops_traffic_history_and_expiry(self):
+        self.register(self.alice, "主持人")
+        self.register(self.bob, "听众")
+        room = self.app.room
+        now = int(time.monotonic())
+        with patch("server.monitor.time.monotonic", return_value=now):
+            host = self.alice.request("stage/request", self.choice)["host"]
+            path = "audio?stream=" + host["stream"]
+            self.assertIsNone(self.bob.request(path))
+            pcm = bytes(range(120))
+            for _ in range(14):
+                self.alice.request(path, pcm)
+            self.assertEqual(self.bob.request(path + "&after=0"), (3, pcm))
+            with self.assertRaisesRegex(OSError, "403"):
+                self.bob.request(path, pcm)
+            with room.lock:
+                s = room.monitor.snapshot(room, now + 1, 19, LEASE)
+            self.assertEqual((s["rx"], s["tx"], s["uploads"], s["downloads"]), (1680, 120, 14, 1))
+            self.assertEqual((s["empty_reads"], s["cursor_gaps"], s["failures"], s["pulling"]), (1, 2, 1, 1))
+            self.assertEqual(s["members"][0]["client"], "Windows 客户端")
+            self.assertEqual((s["buffer_blocks"], s["host"]["sequence"]), (12, 14))
+            self.assertEqual((s["rx_bps"], s["tx_bps"]), (1344, 96))
+            self.assertNotIn(host["stream"], json.dumps(s))
+            self.assertNotIn("audimate=", json.dumps(s))
+        with room.lock:
+            room.expire(now + LEASE + 1)
+            later = room.monitor.snapshot(room, now + 610, 19, LEASE)
+        self.assertEqual(later["members"], [])
+        self.assertIsNone(later["host"])
+        self.assertTrue(all(p["rx_bps"] == p["tx_bps"] == 0 for p in later["history"]))
+        self.assertTrue(any("连接超时" in e["message"] for e in later["events"]))

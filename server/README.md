@@ -19,7 +19,7 @@ python -m server.dev --db build/audimate-local.sqlite3
 
 ## Ubuntu 测试机部署
 
-在 Ubuntu 24.04 测试机安装 `gunicorn`、`nginx`、`python3-venv`。将本目录中的 `app.py`、`web/` 和 `deploy/` 放到 `/opt/audimate/`。以下命令以 root 在服务器执行。
+在 Ubuntu 24.04 测试机安装 `gunicorn`、`nginx`、`python3-venv`。将本目录中的 `app.py`、`monitor.py`、`ops_admin.py`、`web/` 和 `deploy/` 放到 `/opt/audimate/`。以下命令以 root 在服务器执行。
 
 ```sh
 install -m 0644 /opt/audimate/deploy/audimate.service /etc/systemd/system/
@@ -48,6 +48,29 @@ curl -fsS "https://$AUDIMATE_IP/api/health"
 
 两端的公网地址均为 `https://<公网IP>`。运维联调也可用 `ssh -N -L 17882:127.0.0.1:17881 <测试机别名>`，然后在本机打开 <http://127.0.0.1:17882/>。此地址经 SSH 访问测试机上的房间与数据库。
 
+## 运维监控
+
+打开 `https://<公网IP>/ops/`，用已授权的账号登录。后台每 2 秒更新一次。运维会话独立于房间会话，有效期 8 小时，打开后台不会占用席位。监控 API 为 `GET /ops/api/overview`，每次读取均检查运维权限。
+
+在服务器的 `/opt/audimate` 目录可创建有随机密码的专用账号，或授予、撤销已有账号的运维权限。以下命令中的用户名按需替换。`create` 仅创建新账号并一次性输出凭据，`revoke` 会立即撤销该账号的全部运维会话。
+
+```sh
+python3 ops_admin.py --db /var/lib/audimate/accounts.sqlite3 create ops-alice
+python3 ops_admin.py --db /var/lib/audimate/accounts.sqlite3 grant existing-user
+python3 ops_admin.py --db /var/lib/audimate/accounts.sqlite3 revoke existing-user
+```
+
+| 后台指标 | 统计口径及排障用途 |
+| --- | --- |
+| 在线连接、正在拉流 | 在线按会话计数，超过 20 秒未联系即过期。近 3 秒向当前音源请求音频的听众计入正在拉流。可结合成员列表区分空闲、等待音频和主持申请。 |
+| 入站、出站 | 入站是服务端已接受的 PCM 字节，出站是服务端为各次成功读取返回的 PCM 字节；重复读取再次计入出站。HTTP/TLS 开销和网卡其他流量不计入。每个连接显示其入房后的上传与下载。 |
+| 速率与趋势 | 速率取最近 10 个完整秒的平均值。图中每个点覆盖 5 秒，可选 1、5、10 分钟。空房时曲线自然回落。 |
+| 音源与缓冲 | 可以查看主持、采样率、位深、当前流的最新序号和缓冲占用。有主持且超过 3 秒未收到音频时提示上行无新包。 |
+| 空读与游标跳过 | 空读表示有效的拉流请求暂时没有新块。游标跳过块数按有序号的读取请求累计，常见原因是听众读取较慢，旧块已离开服务器缓冲。 |
+| 排障事件 | 最近 100 条连接、超时、上下台、申请、交接和房间接口错误。相邻的同类异常在 5 秒内合并并保留次数。 |
+
+累计值从当前工作进程启动时开始，趋势和事件保存在有界内存中，重启后重新统计。后台只保留调试所需的统计与房间状态。端到端播放成功率、音量及云厂商计费流量需要在对应端另行测量。
+
 ## 接口与传输
 
 | 接口 | 用途 |
@@ -69,6 +92,7 @@ curl -fsS "https://$AUDIMATE_IP/api/health"
 ```powershell
 python -m unittest server.test_app client.test_online client.test_client -v
 node server/test_browser.cjs
+node server/test_ops_browser.cjs
 ```
 
 网页用例用合成音轨代替系统标签页选择框，实际执行 AudioWorklet、HTTP 上传、另一个浏览器会话的解码和播放调度。设置 `AUDIMATE_BROWSER_PEER=1` 时，桌面测试还会启动 Chrome，用桌面端刚注册的账号登录网页，并核对实际送入浏览器播放的左右声道。设置 `AUDIMATE_TEST_URL` 可在指定的空闲测试房间运行这两个端到端用例，每次生成独立的随机测试账号与密码。系统选源、跨公网延迟和满房容量需单独验收。

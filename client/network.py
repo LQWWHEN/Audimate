@@ -36,7 +36,9 @@ class API:
 
     def request(self, path, data=None):
         raw = isinstance(data, bytes)
-        headers = {"Cookie": self.cookie} if self.cookie else {}
+        headers = {"User-Agent": "Audimate-Desktop/1"}
+        if self.cookie:
+            headers["Cookie"] = self.cookie
         if data is not None:
             headers["Content-Type"] = "application/octet-stream" if raw else "application/json"
         payload = data if raw or data is None else json.dumps(data).encode()
