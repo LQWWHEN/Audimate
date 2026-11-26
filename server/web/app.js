@@ -13,7 +13,7 @@ let mode = "login",
   captureContext,
   publisher,
   listenContext;
-let requesting = false,
+let requesting = false, leaving = false,
   stageGeneration = 0,
   changes = 0;
 
@@ -117,10 +117,13 @@ function refreshPlayback(force=false) {
 }
 function clearInput() {
   stageGeneration++;
-  hostRTC?.close(); hostRTC = null;
-  if (input) input.getTracks().forEach((t) => t.stop());
-  if (captureContext) captureContext.close().catch(() => {});
-  input = captureContext = publisher = null;
+  for (const track of input?.getTracks() || []) {
+    track.onended = null;
+    track.stop();
+  }
+  const released = Promise.allSettled([hostRTC?.close(), captureContext?.close()]);
+  input = captureContext = publisher = hostRTC = null;
+  return released;
 }
 function signedOut() {
   name = "";
@@ -128,6 +131,7 @@ function signedOut() {
   clearTimeout(timer);
   stopListen();
   clearInput();
+  leaving = requesting = false;
   room = null;
   $("room").hidden = $("account").hidden = true;
   $("auth").hidden = false;
@@ -146,7 +150,7 @@ async function poll(version) {
   const before = changes;
   try {
     const state = await api("room" + (playback?.track ? "?listen="+playback.host.stream : ""));
-    if (epoch === version && before === changes && !requesting) render(state);
+    if (epoch === version && before === changes && !requesting && !leaving) render(state);
   } catch (e) {
     if (epoch === version) note(e.message);
   }
@@ -178,15 +182,16 @@ function render(state) {
     ? h.name + " · " + h.rate / 1000 + " kHz · " + h.bits + "-bit · " + (h.codec === "opus" ? "Opus "+h.bitrate/1000+" kbps" : "无损 PCM")
     : "";
   $("listen").disabled = room.hosting && !listening;
-  $("stage").textContent = room.hosting
+  $("stage").textContent = leaving ? "正在下台…" : room.hosting
     ? "下台"
     : room.pending
       ? "已申请主持"
       : h
         ? "申请主持"
         : "主持 · 共享音频";
-  $("stage").disabled = room.pending || requesting;
+  $("stage").disabled = room.pending || requesting || leaving;
   $("cancel").hidden = !room.pending;
+  $("cancel").disabled = leaving;
   $("quality").disabled = room.hosting || room.pending || requesting;
   $("requests").replaceChildren();
   for (const r of room.requests) {
@@ -229,18 +234,27 @@ function render(state) {
     });
   }
 }
-async function leave() {
-  const stream = room?.host?.stream || "";
-  clearInput();
+async function leave(state = room) {
+  if (leaving || !state) return;
+  const version = epoch, stream = state.host?.stream || "";
+  leaving = true;
+  const released = clearInput();
+  if (room) render(room);
   try {
     const updated = await api("stage/leave", { stream });
-    changes++;
-    render(updated);
+    if (version === epoch) room = updated;
   } catch (e) {
-    note(e.message);
+    if (version === epoch) note(e.message);
+  } finally {
+    await released;
+    if (version === epoch) {
+      leaving = false;
+      changes++;
+      if (room) render(room);
+    }
   }
 }
-$("cancel").onclick = leave;
+$("cancel").onclick = () => leave();
 function sharedAudioSource(stream) {
   const surface = stream.getVideoTracks()[0]?.getSettings().displaySurface;
   if (surface !== "window" && surface !== "browser")
@@ -259,6 +273,7 @@ function sharedAudioSource(stream) {
   return surface === "window" ? "应用窗口" : "浏览器标签页";
 }
 $("stage").onclick = async () => {
+  if (requesting || leaving) return;
   if (room?.hosting) return leave();
   requesting = true;
   $("stage").disabled = true;
@@ -282,18 +297,33 @@ $("stage").onclick = async () => {
     }
     input = chosen;
     const source = sharedAudioSource(chosen);
-    for (const track of chosen.getTracks())
+    // The window was needed to authorize its application audio. A minimized
+    // window can lose its video surface while its process is still playing.
+    for (const track of chosen.getTracks()) {
+      if (track.kind === "video" && track.getSettings().displaySurface === "window") {
+        track.stop();
+        continue;
+      }
       track.onended = () => {
-        if (input === chosen) leave();
+        if (input !== chosen) return;
+        if (requesting) clearInput();
+        else leave();
       };
+    }
     captureContext = new AudioContext({ sampleRate: rate });
     await captureContext.resume();
+    if (input !== chosen) return;
     const state = await api("stage/request", {
       source,
       rate: captureContext.sampleRate,
       bits, codec: $("codec").value === "pcm" ? "pcm" : "opus",
       bitrate: ({opus64:64000, opus256:256000})[$("codec").value] || 128000,
     });
+    if (version !== epoch) return;
+    if (input !== chosen) {
+      await leave(state);
+      return;
+    }
     changes++;
     requesting = false;
     render(state);
@@ -302,8 +332,10 @@ $("stage").onclick = async () => {
     clearInput();
     note(e.name === "NotAllowedError" ? "未获得共享权限。要上台，请重新选择音源并允许共享。" : e.message);
   } finally {
-    requesting = false;
-    if (room) render(room);
+    if (version === epoch) {
+      requesting = false;
+      if (room) render(room);
+    }
   }
 };
 async function publish(stream, bits) {
@@ -320,6 +352,7 @@ async function publish(stream, bits) {
     const track = new LivekitClient.LocalAudioTrack(destination.stream.getAudioTracks()[0], undefined, true);
     await session.room.localParticipant.publishTrack(track, {name:"music", source:LivekitClient.Track.Source.Microphone,
       audioPreset:{maxBitrate:host.bitrate}, forceStereo:true, dtx:false, red:true});
+    if (session.closed) { track.stop(); return; }
     session.timer = setInterval(async () => {
       if (session.closed) return;
       try {

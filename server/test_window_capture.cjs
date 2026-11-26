@@ -18,8 +18,18 @@ else:
     winsound.PlaySound(file, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP)
     def control():
         for command in sys.stdin:
-            if command.strip() == "pause":
+            action = command.strip()
+            if action == "pause":
                 winsound.PlaySound(None, 0)
+            elif action in ("minimize", "restore"):
+                def change_window(action=action):
+                    if action == "minimize":
+                        ui.iconify()
+                    else:
+                        ui.deiconify()
+                    ui.update_idletasks()
+                    print(ui.state(), flush=True)
+                ui.after(0, change_window)
         ui.after(0, ui.destroy)
     threading.Thread(target=control, daemon=True).start()
     ui.after(250, lambda: print("ready", flush=True))
@@ -60,6 +70,17 @@ async function startWindowPlayers(directory) {
     return {
       args: ["--auto-select-window-capture-source-by-title=" + title, "--system-audio-capture-default_checked"],
       pause: () => target.stdin.write("pause\n"),
+      setMinimized(minimized) {
+        return new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => reject(Error("播放器窗口状态切换超时")), 5000);
+          target.stdout.once("data", data => {
+            clearTimeout(timeout);
+            if (data.toString().trim() === (minimized ? "iconic" : "normal")) resolve();
+            else reject(Error("播放器窗口状态不符：" + data));
+          });
+          target.stdin.write(minimized ? "minimize\n" : "restore\n");
+        });
+      },
       close,
     };
   } catch (error) {

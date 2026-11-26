@@ -270,6 +270,57 @@ async function run() {
     }
     assert.match(await listener.textContent("#hostInfo"), /96 kHz · 24-bit/);
     assert.equal(await listener.textContent("#source"), "应用窗口");
+    if (windowPlayers) {
+      await windowPlayers.setMinimized(true);
+      await listener.evaluate(() => window.samplesReceived = 0);
+      await listener.waitForFunction(() => window.samplesReceived >= 10);
+    }
+    // The server has removed the host, but its HTTP acknowledgement is still in flight.
+    // A room poll must not offer a new picker that the old leave response can tear down.
+    let releaseLeave;
+    const holdLeave = new Promise(resolve => { releaseLeave = resolve; });
+    let serverLeft;
+    const left = new Promise(resolve => { serverLeft = resolve; });
+    await host.route("**/api/stage/leave", async route => {
+      const response = await route.fetch();
+      serverLeft();
+      await holdLeave;
+      await route.fulfill({response});
+    }, {times: 1});
+    const previousStream = await host.evaluate(() => {
+      window.oldCaptureTracks = input.getTracks();
+      if (input.getVideoTracks()[0].readyState !== "ended" || input.getAudioTracks()[0].readyState !== "live")
+        throw Error("窗口主持应只保留应用音轨");
+      return room.host.stream;
+    });
+    if (windowPlayers) await host.click("#stage");
+    else await host.evaluate(() => {
+      const audio = input.getAudioTracks()[0];
+      audio.stop();
+      audio.dispatchEvent(new Event("ended")); // Browser's Stop Sharing notification.
+    });
+    try {
+      await left;
+      await host.waitForResponse(r => new URL(r.url()).pathname === "/api/room" && r.ok());
+      assert.equal(await host.locator("#stage").isDisabled(), true, "下台未完成时不能重开选择器");
+      assert.ok(await host.evaluate(() => oldCaptureTracks.every(t => t.readyState === "ended")));
+    } finally {
+      releaseLeave();
+    }
+    await host.waitForFunction(() => !room.hosting && !document.querySelector("#stage").disabled);
+    await host.click("#stage");
+    if (windowPlayers) {
+      // A minimized window can be absent from the native picker. Keep it open
+      // while restoring the same process and allow Chrome to update its list.
+      await host.waitForResponse(r => new URL(r.url()).pathname === "/api/room" && r.ok());
+      console.log("Native picker before restore:", await host.evaluate(() => room.hosting ? "selected minimized window" : "awaiting selection"));
+      await windowPlayers.setMinimized(false);
+    }
+    await host.waitForFunction(previous => room.hosting && room.host.stream !== previous, previousStream);
+    await listener.waitForFunction(id => playback?.host.stream === id,
+      await host.evaluate(() => room.host.stream));
+    await listener.evaluate(() => window.samplesReceived = 0);
+    await listener.waitForFunction(() => window.samplesReceived > 0);
     if (windowPlayers) await verifyWindowIsolation(listener, windowPlayers);
     if (process.env.AUDIMATE_SCREENSHOTS) {
       await host.screenshot({path:path.join(process.env.AUDIMATE_SCREENSHOTS,"room.png"),fullPage:true});

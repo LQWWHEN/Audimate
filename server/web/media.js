@@ -36,7 +36,7 @@ async function connectRTC(host, role, session) {
 
 function rtcSession() {
   return {room: new LivekitClient.Room({disconnectOnPageLeave: true}), closed: false,
-    close() { this.closed = true; clearInterval(this.timer); this.room.disconnect().catch(() => {}); }};
+    close() { this.closed = true; clearInterval(this.timer); return this.room.disconnect().catch(() => {}); }};
 }
 
 async function rtcMetrics(track) {
