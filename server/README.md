@@ -117,6 +117,6 @@ node server/test_ops_browser.cjs
 node server/test_browser.cjs --livekit
 ```
 
-网页用例默认用合成音轨模拟浏览器来源选择，实际执行上传、解码和播放。Windows 开发机可运行 `node server/test_browser.cjs --native-window`，需要桌面会话、支持应用音频的 Chrome、Python Tk 和可用的音频输出。该用例让两个独立进程播放 700 Hz 和 1800 Hz 测试音，通过原生选择器选择前者，在另一个浏览器会话中检查目标音、干扰音和暂停后的静音，再切换到标签页主持。
+网页用例默认用合成音轨模拟浏览器来源选择，实际执行上传、解码和播放。Windows 开发机可运行 `node server/test_browser.cjs --native-window`，需要桌面会话、支持应用音频的 Chrome、Python Tk 和可用的音频输出。目标窗口在左声道播放 700 Hz、右声道播放 14 kHz，另一个进程播放 1800 Hz 干扰音。用例在 PCM 听众端检查左右电平、串音、干扰和目标暂停后的静音，再切换到标签页主持。加上 `--livekit` 还会在 Opus 解码后检查声道分离和电平。
 
 设置 `AUDIMATE_BROWSER_PEER=1` 时，桌面测试还会启动 Chrome，用桌面端刚注册的账号登录网页，并核对实际送入浏览器播放的左右声道。设置 `AUDIMATE_TEST_URL` 可在指定的空闲测试房间运行端到端用例，每次生成独立的随机测试账号与密码。在 Windows 开发机上也可针对已部署的 Linux SFU 运行。此机使用 Windows SFU 与原生媒体桥接同机启动时出现 ICE 超时，公网 Linux 测试路径已完成互通。真实音乐网站选源、跨网络声学延迟和满房容量需单独验收。

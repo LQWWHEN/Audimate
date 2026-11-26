@@ -287,7 +287,13 @@ $("stage").onclick = async () => {
       throw Error("请通过 HTTPS 在桌面 Chrome 或 Edge 中共享音频。");
     const chosen = await navigator.mediaDevices.getDisplayMedia({
       video: { displaySurface: "window" },
-      audio: true,
+      // Speech processing can merge the channels and attenuate sustained music.
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: { ideal: 2 },
+      },
       audioSelection: "preferred",
       windowAudio: "window",
       systemAudio: "exclude",

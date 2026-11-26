@@ -7,7 +7,7 @@ const os = require("node:os");
 const path = require("node:path");
 const { once } = require("node:events");
 const { randomBytes } = require("node:crypto");
-const { startWindowPlayers, verifyWindowIsolation } = require("./test_window_capture.cjs");
+const { startWindowPlayers, verifyWindowAudio } = require("./test_window_capture.cjs");
 
 async function account(page, url, user, password, register) {
   await page.goto(url);
@@ -196,7 +196,8 @@ async function run() {
     assert.deepEqual(await host.evaluate(() => [
       captureOptions.audio, captureOptions.audioSelection, captureOptions.windowAudio,
       captureOptions.systemAudio, captureOptions.monitorTypeSurfaces
-    ]), [true, "preferred", "window", "exclude", "exclude"]);
+    ]), [{echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: {ideal: 2}},
+      "preferred", "window", "exclude", "exclude"]);
     if (windowPlayers) {
       await host.evaluate(picker => navigator.mediaDevices.getDisplayMedia = picker, originalPicker);
       await host.bringToFront();
@@ -244,6 +245,7 @@ async function run() {
         throw Error("RTC playback "+JSON.stringify({detail,sender,errors}));
       }
       await report;
+      if (windowPlayers) await verifyWindowAudio(listener, "opus");
       if (process.env.AUDIMATE_TEST_URL) await listener.evaluate(async()=>{
         const grant=await api("media",{stream:room.host.stream,role:"listen"});
         window.testOldGrant=grant.token;
@@ -324,7 +326,7 @@ async function run() {
       await host.evaluate(() => room.host.stream));
     await listener.evaluate(() => window.samplesReceived = 0);
     await listener.waitForFunction(() => window.samplesReceived > 0);
-    if (windowPlayers) await verifyWindowIsolation(listener, windowPlayers);
+    if (windowPlayers) await verifyWindowAudio(listener, "pcm", windowPlayers);
     if (process.env.AUDIMATE_SCREENSHOTS) {
       await host.screenshot({path:path.join(process.env.AUDIMATE_SCREENSHOTS,"room.png"),fullPage:true});
       await listener.screenshot({path:path.join(process.env.AUDIMATE_SCREENSHOTS,"listener-mobile.png"),fullPage:true});

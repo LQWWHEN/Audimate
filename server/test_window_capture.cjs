@@ -8,7 +8,7 @@ const player = `
 from host.capture.test_isolation import write_tone, player
 import sys, threading, tkinter as tk, winsound
 file, frequency, title = sys.argv[1:]
-write_tone(file, int(frequency), int(frequency))
+write_tone(file, int(frequency), 14000 if title else int(frequency))
 if not title:
     player(file)
 else:
@@ -89,31 +89,61 @@ async function startWindowPlayers(directory) {
   }
 }
 
-async function verifyWindowIsolation(listener, players) {
-  await listener.evaluate(() => {
-    window.windowLevels = [];
-    const start = AudioBufferSourceNode.prototype.start;
-    AudioBufferSourceNode.prototype.start = function (...args) {
-      const samples = this.buffer.getChannelData(0), rate = this.buffer.sampleRate;
-      function amplitude(hz) {
-        let real = 0, imaginary = 0;
-        for (let i = 0; i < samples.length; i++) {
-          const phase = 2 * Math.PI * hz * i / rate;
-          real += samples[i] * Math.cos(phase);
-          imaginary += samples[i] * Math.sin(phase);
-        }
-        return 2 * Math.hypot(real, imaginary) / samples.length;
+async function verifyWindowAudio(listener, transport, players) {
+  const meter = await listener.evaluateHandle(transport => {
+    const source = transport === "opus" ? window.decodedSource : playback.gain;
+    const ctx = source.context, split = ctx.createChannelSplitter(2);
+    source.connect(split);
+    const channels = [0, 1].map(channel => {
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 4096;
+      split.connect(analyser, channel);
+      return analyser;
+    });
+    function amplitude(samples, hz) {
+      let real = 0, imaginary = 0;
+      for (let i = 0; i < samples.length; i++) {
+        const phase = 2 * Math.PI * hz * i / ctx.sampleRate;
+        real += samples[i] * Math.cos(phase);
+        imaginary += samples[i] * Math.sin(phase);
       }
-      windowLevels.push([amplitude(700), amplitude(1800)]);
-      if (windowLevels.length > 3) windowLevels.shift();
-      return start.apply(this, args);
+      return 2 * Math.hypot(real, imaginary) / samples.length;
+    }
+    return {
+      consecutive: 0,
+      levels() {
+        return channels.map(analyser => {
+          const samples = new Float32Array(analyser.fftSize);
+          analyser.getFloatTimeDomainData(samples);
+          return [700, 14000, 1800].map(hz => amplitude(samples, hz));
+        });
+      },
+      close() { source.disconnect(split); split.disconnect(); },
     };
-  });
-  await listener.waitForFunction(() => windowLevels.length === 3 &&
-    windowLevels.every(([target, other]) => target > .002 && other < target * .02));
-  players.pause();
-  await listener.waitForFunction(() => windowLevels.every(([target, other]) => target < .0002 && other < .0002));
-  console.log("PASS: native window audio reached listener, second program excluded, paused target silent");
+  }, transport);
+  try {
+    const levels = await listener.waitForFunction(meter => {
+      // The native player emits each target at 1600/32768 full scale.
+      const [[left, leftLeak, leftOther], [rightLeak, right, rightOther]] = meter.levels();
+      const ok = [left, right].every(level => level > .035 && level < .065) &&
+        Math.max(leftLeak, leftOther) < left * .02 && Math.max(rightLeak, rightOther) < right * .02;
+      meter.consecutive = ok ? meter.consecutive + 1 : 0;
+      return meter.consecutive >= 5 && {left, right, leftLeak, rightLeak, leftOther, rightOther};
+    }, meter, {polling: 200, timeout: 12000});
+    console.log("PASS: native window stereo, high frequency and isolation over", transport, await levels.jsonValue());
+    await levels.dispose();
+    if (players) {
+      players.pause();
+      await meter.evaluate(m => { m.consecutive = 0; });
+      await listener.waitForFunction(m => {
+        m.consecutive = m.levels().flat().every(level => level < .0002) ? m.consecutive + 1 : 0;
+        return m.consecutive >= 3;
+      }, meter, {polling: 200});
+    }
+  } finally {
+    await meter.evaluate(m => m.close());
+    await meter.dispose();
+  }
 }
 
-module.exports = { startWindowPlayers, verifyWindowIsolation };
+module.exports = { startWindowPlayers, verifyWindowAudio };
