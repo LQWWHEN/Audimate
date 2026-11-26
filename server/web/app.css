@@ -4,9 +4,9 @@
     "Microsoft YaHei",
     sans-serif;
   color: #172f32;
-  background: #edf3f0;
-  --ink: #163737;
-  --accent: #08685d;
+  background: #eef2f7;
+  --ink: #182744;
+  --accent: #344bb5;
 }
 * {
   box-sizing: border-box;
@@ -75,7 +75,7 @@ input:focus-visible {
   color: var(--accent);
 }
 .light {
-  background: #def6dc;
+  background: #f2c869;
   color: var(--ink);
 }
 .login {
@@ -88,7 +88,7 @@ input:focus-visible {
 }
 .cover {
   position: relative;
-  background: #1b5351;
+  background: #364e83;
   overflow: hidden;
   min-height: 320px;
 }
@@ -114,7 +114,7 @@ input:focus-visible {
   display: grid;
   place-items: center;
   color: #214440;
-  background: #d7e6a5;
+  background: #f2c869;
   font: 3rem Georgia;
 }
 .login form {
@@ -180,7 +180,7 @@ input {
   display: flex;
   align-items: center;
   gap: 22px;
-  background: #184742;
+  background: #243967;
   color: white;
 }
 .small-disc {
@@ -188,7 +188,7 @@ input {
   height: 76px;
   flex: none;
   border: 18px solid #233c3c;
-  background: #bbd49b;
+  background: #f2c869;
 }
 .player h2,
 .player p,
@@ -262,9 +262,19 @@ input {
     font-size: 0.9rem;
   }
 }
-.actions {
-  flex-wrap: wrap;
-}
+.signal {display:flex; gap:16px; align-items:center; flex-wrap:wrap; padding:10px 16px; background:#e0e6f0; border-bottom:2px solid #b3bfd4}
+.signal output {font-variant-numeric:tabular-nums;color:#34466a}
+.signal button {margin-left:auto}
+.desk {display:grid; grid-template-columns:1fr 1fr; gap:clamp(18px,4vw,48px); margin-top:30px}
+.strip {min-width:0; border-top:3px solid #243967; padding-top:12px}
+.strip h2 {font-size:1.15rem;margin-bottom:14px}
+.strip label:not(.check) {display:grid;gap:4px;font-size:.92rem}
+.strip select {width:100%;margin-bottom:8px}
+.strip .check {display:flex;align-items:center;gap:8px;margin:7px 0}
+.check input {width:auto;accent-color:var(--accent)}
+.actions {align-items:stretch;display:grid;grid-template-columns:minmax(0,1fr);gap:4px;margin:0}
+:focus-visible {outline:3px solid #a16508;outline-offset:2px}
+@media(max-width:600px){.desk{grid-template-columns:1fr}.signal{gap:8px}.player button{margin-left:auto}}
 select {
   font: inherit;
   color: var(--ink);

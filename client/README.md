@@ -3,6 +3,7 @@
 在 Windows 上从仓库根目录运行。需要 x64 Python 3（含 Tkinter）和位数一致的采音 DLL。本机默认构建位于 `build/Release/audimate_capture.dll`；其他构建目录可通过 `--dll` 指定。
 
 ```powershell
+python -m pip install -r client/requirements.txt
 python -m client
 python -m client --dll build/msvc-x64/Release/audimate_capture.dll
 ```
@@ -12,6 +13,8 @@ python -m client --dll build/msvc-x64/Release/audimate_capture.dll
 3. 点击“开始主持”，音频流成功启动后可查看来源、格式和左右电平。点击“下台”结束采音并返回选择界面，再次上台时可更换来源和音质。
 
 以上步骤可独立验证本机采音。要让其他人收听，在主窗口选择进程和音质，点击“连接在线房间”，在房间窗口注册或登录，然后点击主持。空席时立即共享，有主持时发送申请，由现任主持接受或拒绝。在房间窗口可下台、取消申请、收听其他人的音源或退出登录。
+
+在线房间可选择 Opus 或无损 PCM，以及接收偏好、自动同步和校准间隔。点一次收听即可等待主持并跟随换台。播放偏好和最多三份 256 KiB 的传输日志位于 `%LOCALAPPDATA%/Audimate/`。运维调整诊断级别后，已连接的客户端在下一次房间轮询时采用新值。
 
 服务地址默认为 `http://127.0.0.1:17881`。可在登录页直接填写测试机的 HTTPS 地址，或用环境变量 `AUDIMATE_SERVER` 指定默认值。桌面端和网页端共用账号。[房间服务与网页使用说明](../server/README.md)
 

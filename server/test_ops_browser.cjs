@@ -68,6 +68,10 @@ async function run() {
       assert.equal(data.status(), 200);
       assert.ok(pcm.equals(await data.body()));
     }
+    if (service) {
+      await post(listener,"/api/diagnostics",{stream,event:"play",transport:"pcm",playout_ms:642.5,clock_error_ms:8.2,buffer_ms:200});
+      await page.waitForFunction(()=>document.querySelector("#p95").textContent.includes("643 ms"));
+    }
     const current = await snapshot();
     assert.equal(current.members.length, 2);
     assert.equal(current.pulling, 1);
@@ -81,11 +85,31 @@ async function run() {
     assert.equal(await page.locator('[data-range="60"]').getAttribute("aria-pressed"), "true");
     await page.selectOption("#filter", "主持");
     assert.ok((await page.locator("#log").textContent()).includes("上台"));
+    if (process.env.AUDIMATE_SCREENSHOTS) await page.screenshot({path:path.join(process.env.AUDIMATE_SCREENSHOTS,"operations.png"),fullPage:true});
     await page.setViewportSize({width: 390, height: 760});
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
     await post(host, "/api/stage/leave", {stream});
     stream = null;
     await page.waitForFunction(() => document.querySelector("#streamState").textContent === "空席");
+    if (service) {
+      page.on("dialog",dialog=>dialog.accept());
+      await page.selectOption("#level","errors");
+      await page.click("#saveLevel");
+      await page.waitForFunction(()=>latest.service.active.logging==="errors");
+      await page.click("#maintenance");
+      await page.waitForFunction(()=>latest.service.maintenance);
+      assert.equal((await host.get(url+"/api/room")).status(),401);
+      await page.fill("#history","3"); await page.fill("#intervals","5, 15");
+      await page.click("#config button");
+      await page.waitForFunction(()=>latest.service.pending.history_s===3);
+      assert.equal((await snapshot()).service.active.history_s,5);
+      await page.click("#restart");
+      await page.waitForFunction(()=>latest.service.active.history_s===3);
+      await page.click("#open");
+      await page.waitForFunction(()=>!latest.service.maintenance);
+      await page.fill("#query",name); await page.click("#findAccount button");
+      await page.waitForFunction(()=>document.querySelector("#accounts").options.length>0);
+    }
     await page.click("#logout");
     await page.waitForSelector("#auth:visible");
     assert.equal((await page.request.get(url + "/ops/api/overview")).status(), 401);

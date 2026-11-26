@@ -1,0 +1,17 @@
+diff --git a/pkg/rtc/participant.go b/pkg/rtc/participant.go
+--- a/pkg/rtc/participant.go
++++ b/pkg/rtc/participant.go
+@@ -3162,7 +3162,12 @@
+ 		AudioFeatures:         sutils.DedupeSlice(req.AudioFeatures),
+ 		PacketTrailerFeatures: sutils.DedupeSlice(req.PacketTrailerFeatures),
+ 	}
+-	if req.Stereo && !slices.Contains(ti.AudioFeatures, livekit.AudioTrackFeature_TF_STEREO) {
++	// Audimate's pinned native SDK omits the stereo flag for its two-channel
++	// AudioSource. Only its explicitly named music track opts into stereo.
++	if req.Type == livekit.TrackType_AUDIO && req.Name == "audimate-stereo" {
++		ti.Stereo = true
++	}
++	if ti.Stereo && !slices.Contains(ti.AudioFeatures, livekit.AudioTrackFeature_TF_STEREO) {
+ 		ti.AudioFeatures = append(ti.AudioFeatures, livekit.AudioTrackFeature_TF_STEREO)
+ 	}
+ 	if req.DisableDtx && !slices.Contains(ti.AudioFeatures, livekit.AudioTrackFeature_TF_NO_DTX) {

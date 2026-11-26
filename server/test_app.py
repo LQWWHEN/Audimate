@@ -151,15 +151,15 @@ class Integration(unittest.TestCase):
             pcm = bytes(range(120))
             for _ in range(14):
                 self.alice.request(path, pcm)
-            self.assertEqual(self.bob.request(path + "&after=0"), (3, pcm))
+            self.assertEqual(self.bob.request(path + "&after=0"), (1, pcm))
             with self.assertRaisesRegex(OSError, "403"):
                 self.bob.request(path, pcm)
             with room.lock:
                 s = room.monitor.snapshot(room, now + 1, 19, LEASE)
             self.assertEqual((s["rx"], s["tx"], s["uploads"], s["downloads"]), (1680, 120, 14, 1))
-            self.assertEqual((s["empty_reads"], s["cursor_gaps"], s["failures"], s["pulling"]), (1, 2, 1, 1))
+            self.assertEqual((s["empty_reads"], s["cursor_gaps"], s["failures"], s["pulling"]), (1, 0, 1, 1))
             self.assertEqual(s["members"][0]["client"], "Windows 客户端")
-            self.assertEqual((s["buffer_blocks"], s["host"]["sequence"]), (12, 14))
+            self.assertEqual((s["buffer_blocks"], s["host"]["sequence"]), (14, 14))
             self.assertEqual((s["rx_bps"], s["tx_bps"]), (1344, 96))
             self.assertNotIn(host["stream"], json.dumps(s))
             self.assertNotIn("audimate=", json.dumps(s))

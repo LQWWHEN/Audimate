@@ -155,7 +155,7 @@ function render(s) {
   const details = [
     ["音频格式", host ? host.rate / 1000 + " kHz / " + host.bits + "-bit / 双声道" : "—"],
     ["最近上行", flowing ? host.last_audio_s + " 秒前" : "—"],
-    ["缓冲块数", s.buffer_blocks + " / " + s.buffer_limit],
+    ["缓冲块数", s.buffer_blocks + " 块 · 上限 " + s.history_s + " 秒"],
     ["当前流序号", host ? host.sequence : "—"]
   ];
   byId("streamInfo").replaceChildren(...details.map(([key, value]) => {
@@ -175,6 +175,7 @@ function render(s) {
   byId("emptyMembers").hidden = s.members.length > 0;
   byId("diagnostics").textContent = "累计音频块 · 收 " + s.uploads + " / 发 " + s.downloads +
     "　空读 " + s.empty_reads + "　游标跳过块数 " + s.cursor_gaps + "　房间接口错误 " + s.failures;
+  renderControl(s);
   events();
   plot();
 }
@@ -244,5 +245,61 @@ for (const button of byId("range").querySelectorAll("button")) {
     plot();
   };
 }
+let previousConfig = "";
+const ms = value => Number.isFinite(value) ? Math.round(value) + " ms" : "—";
+function renderControl(s) {
+  const {maintenance,restarting,active,pending,audit} = s.service;
+  const meter=s.sfu;
+  byId("sfuTraffic").textContent=meter ? "LiveKit RTP　入站 "+displayBytes(meter.incoming)+" / 出站 "+displayBytes(meter.outgoing)
+      + (meter.rx_bps==null?"":"　当前 "+rate(meter.rx_bps)+" / "+rate(meter.tx_bps)) : "LiveKit RTP　等待 SFU 指标";
+  byId("serviceState").textContent = restarting ? "正在重启媒体服务" : maintenance ? "维护中" : "已开放";
+  byId("activeConfig").textContent = "生效缓存 " + active.history_s + " 秒 · 校准档位 " + active.intervals.join(" / ") + " 秒";
+  const signature=JSON.stringify([pending,active.logging]);
+  if (signature!==previousConfig) {
+    byId("history").value=pending.history_s; byId("intervals").value=pending.intervals.join(", ");
+    byId("level").value=active.logging; previousConfig=signature;
+  }
+  for(const el of byId("config").elements) el.disabled=!maintenance;
+  byId("maintenance").disabled=maintenance;
+  byId("restart").disabled=!maintenance || restarting;
+  byId("open").disabled=!maintenance || restarting || JSON.stringify(active)!==JSON.stringify(pending);
+  byId("audit").replaceChildren(...audit.map(a=>node("li",clock(a.time)+"　"+a.actor+"　"+a.action)));
+  const latencies=s.samples.filter(x=>Number.isFinite(x.playout_ms)).map(x=>x.playout_ms).sort((a,b)=>a-b);
+  byId("p95").textContent="预计播放延迟 P95　"+ms(latencies[Math.ceil(latencies.length*.95)-1])+"　("+latencies.length+" 个样本)";
+  const detailNames={timeline_ms:"缓存位置 ms",rtcp_lag_ms:"RTCP 时差估计 ms",clock_error_ms:"对时半往返 ms",jitter_ms:"抖动 ms",upload_ms:"上传 ms",discarded:"丢弃",lost:"丢包",underruns:"欠载",bytes:"RTP 累计字节"};
+  byId("samples").replaceChildren(...s.samples.slice(0,60).map(x=>{
+    const row=document.createElement("tr");
+    const details=Object.entries(detailNames).filter(([k])=>x[k]!=null).map(([k,v])=>v+" "+x[k]).join(" · ");
+    for (const v of [clock(x.time),x.name+" / "+x.client+" / "+x.session,x.transport+" / "+x.event,ms(x.playout_ms),ms(x.rtt_ms),ms(x.buffer_ms),details||"—"]) row.append(node("td",v));
+    return row;
+  }));
+  byId("noSamples").hidden=!!s.samples.length;
+}
+async function manage(action,data={}) {
+  try {render(await api("service/"+action,data)); byId("opResult").textContent="操作已完成";}
+  catch(e){byId("opResult").textContent=e.message;}
+}
+byId("config").onsubmit=e=>{e.preventDefault();manage("configure",{history_s:Number(byId("history").value),intervals:byId("intervals").value.split(/[,，]/).map(Number)});};
+byId("saveLevel").onclick=()=>manage("logging",{logging:byId("level").value});
+byId("maintenance").onclick=()=>{if(confirm("进入维护将结束所有普通用户会话。继续？"))manage("maintenance");};
+byId("restart").onclick=()=>{if(confirm("现在重启并应用暂存配置？"))manage("restart");};
+byId("open").onclick=()=>manage("open");
+byId("findAccount").onsubmit=async e=>{
+  e.preventDefault();
+  try {
+    const rows=await api("accounts?name="+encodeURIComponent(byId("query").value));
+    byId("accounts").replaceChildren(...rows.map(r=>new Option(r.name+(r.disabled?"（已停用）":""),r.name)));
+    byId("accountResult").textContent=rows.length+" 条结果，最多显示 100 条";
+  }catch(err){byId("accountResult").textContent=err.message;}
+};
+byId("accountOp").onchange=()=>{byId("newSecret").hidden=byId("accountOp").value!=="password";};
+byId("accountAction").onsubmit=async e=>{
+  e.preventDefault();
+  const name=byId("accounts").value,action=byId("accountOp").value;
+  if(!name||!confirm("对 "+name+" 执行所选操作？"))return;
+  try {render(await api("accounts",{name,action,password:byId("newPassword").value}));byId("accountResult").textContent="已更新 "+name;}
+  catch(err){byId("accountResult").textContent=err.message;}
+  finally{byId("newPassword").value="";}
+};
 window.addEventListener("resize", plot);
 refresh();

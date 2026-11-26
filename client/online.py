@@ -1,6 +1,10 @@
 """Tk room panel; all HTTP and audio IO run outside the Tk event loop."""
 from concurrent.futures import ThreadPoolExecutor
 import time
+import json
+import os
+from pathlib import Path
+from .rtc import RTCWorker
 import tkinter as tk
 from tkinter import ttk
 
@@ -13,7 +17,7 @@ class OnlineRoom:
         self.client = client
         self.window = w = tk.Toplevel(client.root)
         w.title("Audimate · 在线音乐房间")
-        w.geometry("540x445")
+        w.geometry("575x550")
         w.protocol("WM_DELETE_WINDOW", self.close)
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.future = self.api = self.state = self.selection = None
@@ -31,6 +35,20 @@ class OnlineRoom:
         self.addr = tk.StringVar(w, default_server())
         self.user = tk.StringVar(w)
         self.password = tk.StringVar(w)
+        self.preferences = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Audimate" / "listening.json"
+        try:
+            saved = json.loads(self.preferences.read_text(encoding="utf-8"))
+            if not isinstance(saved, dict):
+                saved = {}
+        except (OSError, ValueError):
+            saved = {}
+        self.want_listen = False
+        self.fallback_stream = ""
+        self.last_sync = self.retry_at = 0
+        self.codec = tk.StringVar(w, "Opus 128 kbps")
+        self.receive = tk.StringVar(w, saved.get("receive", "Opus"))
+        self.auto = tk.BooleanVar(w, bool(saved.get("auto", True)))
+        self.interval = tk.StringVar(w, str(saved.get("interval", 5)))
         self.auth_screen()
         self.tick_id = w.after(80, self.tick)
 
@@ -86,7 +104,22 @@ class OnlineRoom:
         self.stage.pack(side="left", padx=8)
         self.requests = ttk.Frame(self.frame)
         self.requests.grid(row=3, columnspan=2, sticky="ew")
-        self.notice(4)
+        prefs = ttk.LabelFrame(self.frame, text="传输与同步", padding=8)
+        prefs.grid(row=4, columnspan=2, sticky="ew", pady=8)
+        for row, (title, variable, values) in enumerate((("主持上传",self.codec,("Opus 64 kbps","Opus 128 kbps","Opus 256 kbps","无损 PCM")),
+                                                       ("优先接收",self.receive,("Opus","无损 PCM")),
+                                                       ("校准间隔（秒）",self.interval,("5",)))):
+            ttk.Label(prefs,text=title).grid(row=row,column=0,sticky="w",padx=5)
+            select = ttk.Combobox(prefs,textvariable=variable,values=values,state="readonly",width=12)
+            select.grid(row=row,column=1,sticky="w",pady=2)
+            select.bind("<<ComboboxSelected>>", lambda e: self.save_preferences())
+            if variable is self.codec:
+                self.codec_select = select
+            if variable is self.interval:
+                self.intervals = select
+        ttk.Checkbutton(prefs,text="自动同步",variable=self.auto,command=self.save_preferences).grid(row=2,column=2,padx=8)
+        ttk.Button(buttons,text="手动同步",command=self.manual_sync).pack(side="left")
+        self.notice(5)
         self.status.set("请选择主窗口的进程与音质，再点击此处主持。")
         self.next_poll = 0
 
@@ -113,19 +146,39 @@ class OnlineRoom:
     def logged_out(self, _):
         self.stop_stream()
         self.stop_listen()
+        self.want_listen = False
         self.name = self.stream = ""
         self.selection = self.state = None
         self.pending = False
         self.auth_screen()
         self.status.set("已退出")
 
+    def save_preferences(self):
+        data = dict(receive=self.receive.get(), auto=self.auto.get(), interval=int(self.interval.get()))
+        try:
+            self.preferences.parent.mkdir(exist_ok=True, parents=True)
+            self.preferences.write_text(json.dumps(data), encoding="utf-8")
+        except OSError as exc:
+            self.status.set(str(exc))
+        if self.state:
+            self.render(self.state)
+
+    def manual_sync(self):
+        if not self.listener:
+            return
+        if self.listener.lag is not None and self.listener.lag < 850 and not self.fallback_stream:
+            self.status.set("已接近实时位置")
+            return
+        self.api.report(self.listener.host["stream"], "sync", "rtc" if isinstance(self.listener,RTCWorker) else "pcm", {})
+        self.stop_listen()
+        self.fallback_stream = ""
+        self.last_sync = time.monotonic()
+        self.render(self.state)
+
     def toggle_listen(self):
-        if self.listener:
-            self.stop_listen()
-        elif self.state and self.state["host"] and not self.state["hosting"]:
-            self.listener = AudioListener(self.api, self.state["host"])
-            self.listener.start()
-        self.listen.configure(text="停止收听" if self.listener else "收听")
+        self.want_listen = not self.want_listen
+        self.fallback_stream = ""
+        self.render(self.state)
 
     def toggle_stage(self):
         if self.polling:
@@ -146,7 +199,10 @@ class OnlineRoom:
             self.status.set(str(exc))
             return
         self.selection = ShareSelection(src, fmt)
-        payload = dict(source=src.name, rate=fmt.sample_rate, bits=fmt.bits_per_sample)
+        payload = dict(source=src.name, rate=fmt.sample_rate, bits=fmt.bits_per_sample,
+                       codec="opus" if self.state["livekit"] and self.codec.get().startswith("Opus") else "pcm")
+        if payload["codec"]=="opus":
+            payload["bitrate"] = int(self.codec.get().split()[1])*1000
         self.submit(lambda: self.api.request("stage/request", payload), self.render)
 
     def release(self):
@@ -165,12 +221,31 @@ class OnlineRoom:
     def render(self, state):
         self.state = state
         host = state["host"]
-        if self.listener and (not host or self.listener.host["stream"] != host["stream"] or state["hosting"]):
+        settings = state["config"]
+        self.api.logging = settings["logging"]
+        intervals = list(map(str,settings["intervals"]))
+        if self.interval.get() not in intervals:
+            if self.want_listen:
+                intervals.append(self.interval.get())
+            else:
+                self.interval.set("5")
+        self.intervals.configure(values=intervals)
+        if not state["livekit"]:
+            self.codec.set("无损 PCM")
+        self.codec_select.configure(state="readonly" if state["livekit"] and not state["hosting"] and not state["pending"] else "disabled")
+        rtc = bool(host and state["livekit"] and (host["codec"]=="opus" or self.receive.get()=="Opus")
+                   and self.fallback_stream != host["stream"])
+        if self.listener and (not self.want_listen or not host or self.listener.host["stream"] != host["stream"]
+                              or state["hosting"] or rtc != isinstance(self.listener, RTCWorker)):
             self.stop_listen()
+        if host and self.want_listen and not state["hosting"] and not self.listener and time.monotonic() >= self.retry_at:
+            self.listener = RTCWorker(self.api, host) if rtc else AudioListener(self.api, host)
+            self.listener.start()
+            self.status.set("收听 LiveKit · Opus" if rtc else "收听 Opus 解码缓存" if host["codec"]=="opus" else "收听无损 PCM")
         if state["hosting"] and self.selection and self.stream != host["stream"]:
             self.stop_stream()
             self.stream = host["stream"]
-            self.upload = AudioUpload(self.api, self.stream)
+            self.upload = RTCWorker(self.api, host, publish=True) if host["codec"] == "opus" else AudioUpload(self.api, self.stream)
             self.capture = LocalCapture(self.client.dll, self.selection, self.upload.add)
             self.upload.start()
             self.capture.start()
@@ -183,8 +258,10 @@ class OnlineRoom:
             self.status.set("主持申请已结束")
         self.pending = state["pending"]
         label = f"主持 {host['name']} · {host['source']} · {host['rate']/1000:g} kHz / {host['bits']}-bit" if host else "等待主持上台"
+        if host:
+            label += f" · Opus {host['bitrate']//1000} kbps" if host["codec"]=="opus" else " · 无损 PCM"
         self.info.configure(text=f"{self.name}  ·  {state['members']} 人在线\n{label}")
-        self.listen.configure(text="停止收听" if self.listener else "收听", state="normal" if host and not state["hosting"] else "disabled")
+        self.listen.configure(text="停止收听" if self.want_listen else "收听", state="disabled" if state["hosting"] and not self.want_listen else "normal")
         self.stage.configure(text="下台" if state["hosting"] else "取消申请" if self.pending else "申请主持" if host else "开始主持")
         for child in self.requests.winfo_children():
             child.destroy()
@@ -216,13 +293,26 @@ class OnlineRoom:
                 self.release()
             elif self.listener and self.listener.error:
                 self.status.set(self.listener.error)
+                if isinstance(self.listener, RTCWorker):
+                    self.fallback_stream = self.listener.host["stream"]
+                self.retry_at = time.monotonic()+1
+                self.api.report(self.listener.host["stream"], "error", "rtc" if isinstance(self.listener,RTCWorker) else "pcm", {})
                 self.stop_listen()
-            elif time.monotonic() >= self.next_poll:
+            elif self.upload and self.upload.notice:
+                self.status.set(self.upload.notice)
+                self.upload.notice = ""
+            elif self.listener and self.listener.lag is not None and self.listener.lag > 1000:
+                lag = self.listener.lag
+                self.status.set(f"接收延迟偏高（约 {lag:.0f} ms），可手动同步")
+                if lag >= self.state["config"]["history_s"]*1000 or (self.auto.get() and time.monotonic()-self.last_sync >= int(self.interval.get())):
+                    self.manual_sync()
+            if not self.future and time.monotonic() >= self.next_poll:
                 if self.state and self.state["hosting"] and not self.selection:
                     self.release()
                 else:
                     self.polling = True
-                    self.submit(lambda: self.api.request("room"), self.render)
+                    route = "room?listen="+self.listener.host["stream"] if self.listener and getattr(self.listener,"subscribed",False) else "room"
+                    self.submit(lambda: self.api.request(route), self.render)
         self.tick_id = self.window.after(80, self.tick)
 
     def close(self):

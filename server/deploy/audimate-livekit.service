@@ -1,0 +1,16 @@
+[Unit]
+Description=Audimate LiveKit SFU
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+DynamicUser=yes
+LoadCredential=config:/etc/audimate/livekit.yaml
+ExecStart=/usr/local/bin/audimate-livekit-server --config ${CREDENTIALS_DIRECTORY}/config
+Restart=on-failure
+NoNewPrivileges=yes
+ProtectSystem=strict
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

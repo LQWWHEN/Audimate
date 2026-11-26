@@ -17,12 +17,14 @@ class StereoPackets extends AudioWorkletProcessor {
           -this.scale,
           Math.min(this.scale - 1, Math.round(value * this.scale)),
         );
-        this.packet.setUint16(this.pos, sample & 0xffff, true);
+        if (this.width === 4) this.packet.setInt32(this.pos, sample, true);
+        else this.packet.setUint16(this.pos, sample & 0xffff, true);
         if (this.width === 3) this.packet.setInt8(this.pos + 2, sample >> 16);
         this.pos += this.width;
       }
       if (this.pos === this.packetBytes) {
-        this.port.postMessage(this.packet.buffer, [this.packet.buffer]);
+        const startTime = (currentFrame+i+1-this.packetBytes/(2*this.width))/sampleRate;
+        this.port.postMessage({pcm:this.packet.buffer,startTime}, [this.packet.buffer]);
         this.packet = new DataView(new ArrayBuffer(this.packetBytes));
         this.pos = 0;
       }

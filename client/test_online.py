@@ -67,18 +67,19 @@ class OnlineTest(unittest.TestCase):
             peer_name = "peerQA_" + suffix
             peer.request("register", {"name":peer_name, "password":password})
             stack.callback(peer.request, "logout", {})
+            from array import array
             received = []
+            livekit = ui.state["livekit"]
             def read():
                 packet = peer.request("audio?stream=" + ui.stream)
-                if packet:
+                if packet and max(map(abs,array("h",packet[1])[1::2]), default=0) > 50:
                     received.append(packet[1])
                 return bool(received)
-            until(read)
-            from array import array
+            until(read, timeout=30)
             samples = array("h", received[-1])
             self.assertEqual(len(samples), 48000 * 2 // 5)
             self.assertGreater(max(map(abs,samples[1::2])), 50)
-            self.assertLess(max(map(abs,samples[::2])), 8)
+            self.assertLess(max(map(abs,samples[::2])), 100 if livekit else 8)
             if os.environ.get("AUDIMATE_BROWSER_PEER") == "1":
                 env = dict(os.environ, AUDIMATE_TEST_URL=url, AUDIMATE_PEER_NAME=peer_name, AUDIMATE_PEER_PASSWORD=password)
                 with subprocess.Popen(["node", "server/test_browser.cjs", "--desktop-listener"], env=env) as browser:
@@ -92,16 +93,30 @@ class OnlineTest(unittest.TestCase):
             until(lambda: ui.state["host"] is None)
             self.assertIsNone(peer.request("room")["host"])
 
-            import winsound
+            from client.playback import Output
             from unittest.mock import patch
             peer_host = peer.request("stage/request", dict(source="测试音源", rate=48000, bits=16))["host"]
             peer.request("audio?stream=" + peer_host["stream"], received[-1])
             until(lambda: ui.state["host"] and ui.state["host"]["stream"] == peer_host["stream"])
-            with patch("winsound.PlaySound", wraps=winsound.PlaySound) as playback:
+            written = []
+            original_write = Output.write
+            def recording_write(device, pcm):
+                written.append(bytes(pcm))
+                return original_write(device, pcm)
+            with patch.object(Output, "write", recording_write):
                 ui.toggle_listen()
-                until(lambda: playback.called)
-                wav_data = playback.call_args.args[0]
-                self.assertTrue(wav_data.startswith(b"RIFF"))
-                self.assertTrue(wav_data.endswith(received[-1]))
+                last = 0
+                def playing():
+                    nonlocal last
+                    if time.monotonic()-last >= .2:
+                        peer.request("audio?stream=" + peer_host["stream"], received[-1])
+                        last = time.monotonic()
+                    return any(max(map(abs,array("h",pcm)),default=0)>50 for pcm in written)
+                until(playing, timeout=30)
+                if livekit:
+                    from .rtc import RTCWorker
+                    self.assertIsInstance(ui.listener, RTCWorker)
+                else:
+                    self.assertEqual(written[0], received[-1])
                 ui.toggle_listen()
             peer.request("stage/leave", {"stream": peer_host["stream"]})

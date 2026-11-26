@@ -10,7 +10,9 @@ WorkingDirectory=/opt/audimate
 Environment=AUDIMATE_DB=/var/lib/audimate/accounts.sqlite3
 Environment=AUDIMATE_TRUST_PROXY=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/usr/bin/gunicorn --bind 127.0.0.1:17881 --workers 1 --worker-class gthread --threads 8 app:create_app()
+EnvironmentFile=-/etc/audimate/livekit.env
+Environment=AUDIMATE_RESTART_FILE=/var/lib/audimate/restart-media
+ExecStart=/opt/audimate-rtc-env/bin/gunicorn --bind 127.0.0.1:17881 --workers 1 --worker-class gthread --threads 8 app:create_app()
 Restart=on-failure
 NoNewPrivileges=yes
 ProtectSystem=strict

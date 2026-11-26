@@ -13,9 +13,7 @@ let mode = "login",
   captureContext,
   publisher,
   listenContext;
-let listenStream = "",
-  requesting = false,
-  sending = false,
+let requesting = false,
   stageGeneration = 0,
   changes = 0;
 
@@ -32,7 +30,7 @@ async function api(path, data) {
   );
   const result = await response.json();
   if (!response.ok) {
-    if (response.status === 401 && name) signedOut();
+    if (response.status === 401 && name) {signedOut(); note(result.error || "请重新登录");}
     throw Error(result.error || "连接失败");
   }
   return result;
@@ -75,16 +73,51 @@ function enter(user) {
   $("auth").hidden = true;
   $("room").hidden = $("account").hidden = false;
   note("");
+  firstRoom = true;
+  clockOffset = null;
+  calibrate().catch(() => {});
   poll(epoch);
 }
+let listening = false, playback, hostRTC, fallbackStream = "", firstRoom = true;
+function clearPlayback() {
+  playback?.close();
+  playback = null;
+}
 function stopListen() {
-  listenStream = "";
+  listening = false;
+  clearPlayback();
   if (listenContext) listenContext.close().catch(() => {});
   listenContext = null;
   $("listen").textContent = "收听";
+  $("latency").textContent = "";
+}
+function refreshPlayback(force=false) {
+  const host = room?.host;
+  const transport = room?.livekit && (host?.codec === "opus" || prefs.receive === "opus") &&
+                    fallbackStream !== host?.stream ? "rtc" : "pcm";
+  if (!force && playback && playback.host.stream === host?.stream && playback.transport === transport && !room.hosting) return;
+  clearPlayback();
+  $("sync").disabled = !listening || !host || room.hosting;
+  if (!listening || !host || room.hosting) {
+    $("actual").textContent = room?.hosting ? "正在主持" : listening ? "等待下一位主持" : "尚未收听";
+    $("latency").textContent = "";
+    return;
+  }
+  const task = playback = new Listening(listenContext, host, transport);
+  $("actual").textContent = transport === "rtc" ? "LiveKit · Opus 立体声" : host.codec === "opus" ? "Opus 解码缓存" : "无损 PCM";
+  (transport === "rtc" ? task.runRTC() : task.runPCM()).catch(e => {
+    if (task.closed || playback!==task) return;
+    diagnostics(host,"disconnect",transport);
+    if (transport === "rtc") {
+      fallbackStream = host.stream;
+      note("已改从服务器缓存收听。原因：" + e.message);
+      refreshPlayback(true);
+    } else { clearPlayback(); note(e.message); }
+  });
 }
 function clearInput() {
   stageGeneration++;
+  hostRTC?.close(); hostRTC = null;
   if (input) input.getTracks().forEach((t) => t.stop());
   if (captureContext) captureContext.close().catch(() => {});
   input = captureContext = publisher = null;
@@ -112,7 +145,7 @@ async function poll(version) {
   if (epoch !== version) return;
   const before = changes;
   try {
-    const state = await api("room");
+    const state = await api("room" + (playback?.track ? "?listen="+playback.host.stream : ""));
     if (epoch === version && before === changes && !requesting) render(state);
   } catch (e) {
     if (epoch === version) note(e.message);
@@ -122,13 +155,29 @@ async function poll(version) {
 function render(state) {
   room = state;
   const h = room.host;
-  if (listenStream && listenStream !== h?.stream) stopListen();
+  if (firstRoom) {
+    $("codec").value = room.livekit ? "opus" : "pcm";
+    firstRoom = false;
+  }
+  for (const option of $("codec").options) option.disabled = !room.livekit && option.value !== "pcm";
+  $("codec").disabled = room.hosting || room.pending || requesting;
+  const intervals = state.config.intervals.slice();
+  if (listening && !intervals.includes(prefs.interval)) intervals.push(prefs.interval);
+  if (!intervals.includes(prefs.interval)) { prefs.interval = 5; savePrefs(); }
+  if ($("interval").dataset.options !== intervals.join()) {
+    $("interval").replaceChildren(...intervals.map(i=>new Option(i+" 秒", i)));
+    $("interval").dataset.options = intervals.join();
+  }
+  $("interval").value = prefs.interval;
+  $("auto").checked = prefs.auto;
+  $("receive").value = prefs.receive;
+  refreshPlayback();
   $("members").textContent = room.members + " 人在线";
   $("source").textContent = h ? h.source : "等待主持上台";
   $("hostInfo").textContent = h
-    ? h.name + " · " + h.rate / 1000 + " kHz · " + h.bits + "-bit"
+    ? h.name + " · " + h.rate / 1000 + " kHz · " + h.bits + "-bit · " + (h.codec === "opus" ? "Opus "+h.bitrate/1000+" kbps" : "无损 PCM")
     : "";
-  $("listen").disabled = !h || room.hosting;
+  $("listen").disabled = room.hosting && !listening;
   $("stage").textContent = room.hosting
     ? "下台"
     : room.pending
@@ -172,9 +221,10 @@ function render(state) {
     clearInput();
     note("本次主持或申请已结束");
   } else if (room.hosting && input && !publisher) {
-    stopListen();
     publish(h.stream, h.bits).catch((e) => {
+      if (room?.host?.stream !== h.stream || !room.hosting || !input) return;
       note(e.message);
+      diagnostics(h,"error","rtc");
       leave();
     });
   }
@@ -224,7 +274,8 @@ $("stage").onclick = async () => {
     const state = await api("stage/request", {
       source: "浏览器标签页",
       rate: captureContext.sampleRate,
-      bits,
+      bits, codec: $("codec").value === "pcm" ? "pcm" : "opus",
+      bitrate: ({opus64:64000, opus256:256000})[$("codec").value] || 128000,
     });
     changes++;
     requesting = false;
@@ -242,6 +293,25 @@ async function publish(stream, bits) {
     ctx = captureContext,
     media = input;
   publisher = true;
+  if (room.host.codec === "opus") {
+    const host = room.host, session = hostRTC = rtcSession();
+    await connectRTC(host, "publish", session);
+    if (session.closed) return;
+    const destination=ctx.createMediaStreamDestination();
+    ctx.createMediaStreamSource(new MediaStream(media.getAudioTracks())).connect(destination);
+    const track = new LivekitClient.LocalAudioTrack(destination.stream.getAudioTracks()[0], undefined, true);
+    await session.room.localParticipant.publishTrack(track, {name:"music", source:LivekitClient.Track.Source.Microphone,
+      audioPreset:{maxBitrate:host.bitrate}, forceStereo:true, dtx:false, red:true});
+    session.timer = setInterval(async () => {
+      if (session.closed) return;
+      try {
+        const metrics = await rtcMetrics(track);
+        diagnostics(host, "publish", "rtc", metrics);
+        if (metrics.rtt_ms > 1000) note("主持上行往返延迟偏高，请检查网络或手动调整音质。");
+      } catch {}
+    }, 2000);
+    return;
+  }
   await ctx.audioWorklet.addModule("/audio-worker.js");
   if (generation !== stageGeneration) return;
   const node = new AudioWorkletNode(ctx, "stereo-packets", {
@@ -253,85 +323,54 @@ async function publish(stream, bits) {
     .createMediaStreamSource(new MediaStream(media.getAudioTracks()))
     .connect(node);
   node.connect(mute).connect(ctx.destination);
-  node.port.onmessage = async (event) => {
-    if (generation !== stageGeneration || sending) return;
-    sending = true;
-    try {
-      const r = await fetch("/api/audio?stream=" + stream, {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: event.data,
-      });
-      if (!r.ok) throw Error("音频上传已结束");
-    } catch (e) {
-      if (generation === stageGeneration) {
-        note(e.message);
-        await leave();
+  const pending = [];
+  let busy=false, dropped=0, reported=0;
+  const host=room.host;
+  async function drain() {
+    busy=true;
+    while (pending.length && generation===stageGeneration) {
+      const {data,captured}=pending.shift(), start=performance.now();
+      try {
+        const r=await fetch("/api/audio?stream="+stream+(captured == null ? "" : "&captured="+Math.round(captured)),
+          {method:"POST",headers:{"Content-Type":"application/octet-stream"},body:data});
+        if (!r.ok) throw Error("音频上传已结束");
+        if (performance.now()-reported>2000) {
+          diagnostics(host,dropped ? "overload":"publish","pcm",{upload_ms:performance.now()-start,discarded:dropped});
+          reported=performance.now(); dropped=0;
+        }
+      } catch(e) {
+        if (generation===stageGeneration) {note(e.message); await leave();}
+        break;
       }
-    } finally {
-      sending = false;
     }
+    busy=false;
+  }
+  node.port.onmessage = event => {
+    if (generation!==stageGeneration) return;
+    if (pending.length>=2) {pending.shift(); dropped++; note("上传赶不上采集，已跳过旧音频。可手动降低共享音质。");}
+    const captured = clockOffset==null ? null : Date.now()+clockOffset+(event.data.startTime-ctx.currentTime)*1000;
+    pending.push({data:event.data.pcm,captured});
+    if (!busy) drain();
   };
 }
 $("listen").onclick = async () => {
-  if (listenContext) return stopListen();
-  const h = room?.host;
-  if (!h) return;
-  const ctx = new AudioContext();
-  listenContext = ctx;
-  listenStream = h.stream;
+  if (listening) {stopListen(); refreshPlayback(); return;}
+  listenContext = new AudioContext();
+  listening = true;
+  await listenContext.resume();
   $("listen").textContent = "停止收听";
-  note("");
-  let after = -1,
-    next = 0;
-  try {
-    await ctx.resume();
-    while (listenContext === ctx) {
-      if (next > ctx.currentTime + 0.65) {
-        await sleep(60);
-        continue;
-      }
-      const r = await fetch(
-        "/api/audio?stream=" + h.stream + "&after=" + after,
-        { cache: "no-store" },
-      );
-      if (r.status === 204) {
-        await sleep(65);
-        continue;
-      }
-      if (!r.ok) throw Error("当前音源已结束");
-      const view = new DataView(await r.arrayBuffer());
-      if (listenContext !== ctx) break;
-      after = Number(r.headers.get("X-Sequence"));
-      const width = h.bits / 8;
-      const buf = ctx.createBuffer(2, view.byteLength / (width * 2), h.rate);
-      for (let channel = 0; channel < 2; channel++) {
-        const target = buf.getChannelData(channel);
-        for (let i = 0; i < target.length; i++) {
-          const j = (2 * i + channel) * width;
-          const v =
-            width === 2
-              ? view.getInt16(j, true)
-              : width === 4
-                ? view.getInt32(j, true)
-                : view.getUint16(j, true) | (view.getInt8(j + 2) << 16);
-          target[i] = v / 2 ** (h.bits - 1);
-        }
-      }
-      const src = ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(ctx.destination);
-      next = Math.max(ctx.currentTime + 0.025, next);
-      src.start(next);
-      next += buf.duration;
-    }
-  } catch (e) {
-    if (listenContext === ctx) {
-      stopListen();
-      note(e.message);
-    }
-  }
+  fallbackStream="";
+  refreshPlayback(true);
 };
+$("sync").onclick=()=>{
+  if (!playback) return;
+  if (playback.lag != null && playback.lag <= 850 && !fallbackStream) {note("已接近实时位置"); return;}
+  diagnostics(playback.host,"sync",playback.transport);
+  fallbackStream=""; refreshPlayback(true); note("正在同步到当前音源");
+};
+$("auto").onchange=()=>{prefs.auto=$("auto").checked; savePrefs();};
+$("interval").onchange=()=>{prefs.interval=Number($("interval").value); savePrefs();};
+$("receive").onchange=()=>{prefs.receive=$("receive").value; savePrefs(); fallbackStream=""; refreshPlayback(true);};
 api("me")
   .then((user) => enter(user.name))
   .catch(() => {});

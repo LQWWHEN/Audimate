@@ -89,6 +89,15 @@ time { color: var(--muted); }
   .grid { grid-template-columns: 1fr; }
   .kpis { grid-template-columns: 1fr 1fr; }
 }
+.controls {display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin:10px 0}
+.controls label {display:grid;gap:3px}
+.controls input,.controls select {font:inherit;border:1px solid #9baabd;padding:7px;background:white;color:#182744;max-width:100%}
+.controls button {min-height:36px}
+#controls output,#accountResult {color:#344bb5}
+#sfuTraffic {margin:9px 0 12px;font-variant-numeric:tabular-nums}
+#telemetry td {font-variant-numeric:tabular-nums}
+#telemetry .scroll {max-height:360px;overflow:auto}
+#audit {max-height:170px;overflow:auto;padding-inline-start:20px}
 @media (max-width: 560px) {
   nav { display: none; }
   .bar { gap: 7px; }

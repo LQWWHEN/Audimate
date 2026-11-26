@@ -1,0 +1,7 @@
+[Unit]
+Description=Apply the Audimate operator's media restart
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl restart audimate-livekit.service
+ExecStart=/usr/bin/rm -f /var/lib/audimate/restart-media

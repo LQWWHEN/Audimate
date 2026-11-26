@@ -6,6 +6,8 @@
     <meta name="theme-color" content="#162f32" />
     <title>Audimate · 音乐房间</title>
     <link rel="stylesheet" href="/app.css" />
+    <script src="/vendor/livekit.js" defer></script>
+    <script src="/media.js" defer></script>
     <script src="/app.js" defer></script>
   </head>
   <body>
@@ -63,8 +65,17 @@
           </div>
           <button id="listen" class="light">收听</button>
         </article>
-        <div class="actions">
-          <label for="quality">共享音质</label>
+        <audio id="liveAudio" autoplay></audio>
+        <div class="signal"><span id="actual">尚未收听</span><output id="latency"></output><button id="sync" class="quiet" disabled>手动同步</button></div>
+        <div class="desk">
+        <section class="strip"><h2>收听设置</h2>
+          <label>接收音质<select id="receive"><option value="opus">节省流量 · Opus</option><option value="pcm">优先无损</option></select></label>
+          <label class="check"><input id="auto" type="checkbox" checked>自动校准延迟</label>
+          <label>校准间隔<select id="interval"><option value="5">5 秒</option></select></label>
+        </section>
+        <section class="strip"><h2>主持台</h2><div class="actions">
+          <label for="codec">上传格式</label><select id="codec"><option value="opus">Opus · 128 kbps</option><option value="opus64">Opus · 64 kbps</option><option value="opus256">Opus · 256 kbps</option><option value="pcm">无损 PCM</option></select>
+          <label for="quality">采集预设</label>
           <select id="quality">
             <option value="48000/16">标准 · 48 kHz / 16-bit</option>
             <option value="44100/16">CD · 44.1 kHz / 16-bit</option>
@@ -73,7 +84,7 @@
           <button id="stage" class="primary" disabled>主持 · 共享标签页</button
           ><button id="cancel" class="quiet" hidden>取消申请</button>
         </div>
-        <div id="requests"></div>
+        <div id="requests"></div></section></div>
       </section>
       <p id="notice" role="status" aria-live="polite"></p>
     </main>

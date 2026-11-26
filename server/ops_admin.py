@@ -1,4 +1,4 @@
-"""Local management of read-only operators for an initialized Audimate database."""
+"""Local management of operators for an initialized Audimate database."""
 import argparse
 from contextlib import closing
 import os
