@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import time
 import json
+import math
 import os
 from pathlib import Path
 from .rtc import RTCWorker
@@ -9,15 +10,18 @@ import tkinter as tk
 from tkinter import ttk
 
 from .network import API, default_server, AudioListener, AudioUpload, RoomError
-from .sharing import LocalCapture, ShareSelection
+from .host_setup import HostSetup
+from .sharing import ProcessCapture, ShareSelection
 
 
 class OnlineRoom:
-    def __init__(self, client):
-        self.client = client
-        self.window = w = tk.Toplevel(client.root)
-        w.title("Audimate · 在线音乐房间")
-        w.geometry("575x550")
+    def __init__(self, window, dll):
+        self.dll = dll
+        self.window = w = window
+        self.picker = None
+        w.title("Audimate · 音乐房间")
+        w.geometry("670x560")
+        w.minsize(600, 510)
         w.protocol("WM_DELETE_WINDOW", self.close)
         self.pool = ThreadPoolExecutor(max_workers=1)
         self.future = self.api = self.state = self.selection = None
@@ -45,7 +49,6 @@ class OnlineRoom:
         self.want_listen = False
         self.fallback_stream = ""
         self.last_sync = self.retry_at = 0
-        self.codec = tk.StringVar(w, "Opus 128 kbps")
         self.receive = tk.StringVar(w, saved.get("receive", "Opus"))
         self.auto = tk.BooleanVar(w, bool(saved.get("auto", True)))
         self.interval = tk.StringVar(w, str(saved.get("interval", 5)))
@@ -58,14 +61,18 @@ class OnlineRoom:
 
     def auth_screen(self):
         self.clear()
-        ttk.Label(self.frame, text="连接音乐房间", style="Heading.TLabel").grid(row=0, columnspan=2, sticky="w", pady=12)
+        ttk.Label(self.frame, text="登录音乐房间", style="Heading.TLabel").grid(row=0, columnspan=2, sticky="w", pady=12)
         for row, (label, var) in enumerate((("服务器", self.addr), ("用户名", self.user), ("密码", self.password)), 1):
             ttk.Label(self.frame, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10))
-            ttk.Entry(self.frame, textvariable=var, show="*" if row == 3 else "").grid(row=row, column=1, sticky="ew", pady=6)
+            entry = ttk.Entry(self.frame, textvariable=var, show="*" if row == 3 else "")
+            entry.grid(row=row, column=1, sticky="ew", pady=6)
+            entry.bind("<Return>", lambda _: self.auth("login"))
+            if var is self.user:
+                entry.focus_set()
         buttons = ttk.Frame(self.frame)
         buttons.grid(row=4, columnspan=2, sticky="e", pady=10)
-        for key, label in (("register", "注册并进入"), ("login", "登录")):
-            ttk.Button(buttons, text=label, command=lambda k=key: self.auth(k)).pack(side="left", padx=4)
+        ttk.Button(buttons, text="注册并进入", command=lambda: self.auth("register")).pack(side="left", padx=6)
+        ttk.Button(buttons, text="登录", style="Primary.TButton", command=lambda: self.auth("login")).pack(side="left")
         self.notice(5)
 
     def notice(self, row):
@@ -98,30 +105,42 @@ class OnlineRoom:
         self.info.grid(row=1, columnspan=2, sticky="w", pady=14)
         buttons = ttk.Frame(self.frame)
         buttons.grid(row=2, columnspan=2, sticky="w")
-        self.listen = ttk.Button(buttons, text="收听", command=self.toggle_listen)
+        self.listen = ttk.Button(buttons, text="收听", command=self.toggle_listen, state="disabled", style="Primary.TButton")
         self.listen.pack(side="left")
-        self.stage = ttk.Button(buttons, text="主持", command=self.toggle_stage)
+        self.stage = ttk.Button(buttons, text="开始主持", command=self.toggle_stage, state="disabled")
         self.stage.pack(side="left", padx=8)
         self.requests = ttk.Frame(self.frame)
         self.requests.grid(row=3, columnspan=2, sticky="ew")
-        prefs = ttk.LabelFrame(self.frame, text="传输与同步", padding=8)
-        prefs.grid(row=4, columnspan=2, sticky="ew", pady=8)
-        for row, (title, variable, values) in enumerate((("主持上传",self.codec,("Opus 64 kbps","Opus 128 kbps","Opus 256 kbps","无损 PCM")),
-                                                       ("优先接收",self.receive,("Opus","无损 PCM")),
+        self.levels = ttk.Label(self.frame, style="Muted.TLabel")
+        self.levels.grid(row=4, columnspan=2, sticky="w")
+        self.levels.grid_remove()
+        self.prefs = prefs = ttk.LabelFrame(self.frame, text="收听设置", padding=8)
+        prefs.grid(row=5, columnspan=2, sticky="ew", pady=8)
+        for row, (title, variable, values) in enumerate((("优先接收",self.receive,("Opus","无损 PCM")),
                                                        ("校准间隔（秒）",self.interval,("5",)))):
             ttk.Label(prefs,text=title).grid(row=row,column=0,sticky="w",padx=5)
             select = ttk.Combobox(prefs,textvariable=variable,values=values,state="readonly",width=12)
             select.grid(row=row,column=1,sticky="w",pady=2)
             select.bind("<<ComboboxSelected>>", lambda e: self.save_preferences())
-            if variable is self.codec:
-                self.codec_select = select
             if variable is self.interval:
                 self.intervals = select
-        ttk.Checkbutton(prefs,text="自动同步",variable=self.auto,command=self.save_preferences).grid(row=2,column=2,padx=8)
-        ttk.Button(buttons,text="手动同步",command=self.manual_sync).pack(side="left")
-        self.notice(5)
-        self.status.set("请选择主窗口的进程与音质，再点击此处主持。")
+        ttk.Checkbutton(prefs,text="自动同步",variable=self.auto,command=self.save_preferences).grid(row=1,column=2,padx=8)
+        self.sync = ttk.Button(prefs,text="立即同步",command=self.manual_sync, state="disabled")
+        self.sync.grid(row=0, column=2, padx=8)
+        self.settings_button = ttk.Button(buttons, text="收听设置", command=self.toggle_preferences)
+        self.settings_button.pack(side="left")
+        prefs.grid_remove()
+        self.notice(6)
+        self.status.set("正在读取房间…")
         self.next_poll = 0
+
+    def toggle_preferences(self):
+        if self.prefs.winfo_manager():
+            self.prefs.grid_remove()
+            self.settings_button.configure(text="收听设置")
+        else:
+            self.prefs.grid()
+            self.settings_button.configure(text="收起设置")
 
     def stop_stream(self):
         for task in (self.capture, self.upload):
@@ -150,6 +169,13 @@ class OnlineRoom:
         self.name = self.stream = ""
         self.selection = self.state = None
         self.pending = False
+        self.after_poll = None
+        self.fallback_stream = ""
+        self.last_sync = self.retry_at = 0
+        if self.picker:
+            self.show_room()
+            self.picker.destroy()
+            self.picker = None
         self.auth_screen()
         self.status.set("已退出")
 
@@ -178,38 +204,74 @@ class OnlineRoom:
     def toggle_listen(self):
         self.want_listen = not self.want_listen
         self.fallback_stream = ""
+        if not self.want_listen:
+            self.status.set("已停止收听")
         self.render(self.state)
 
     def toggle_stage(self):
-        if self.polling:
-            self.after_poll = self.toggle_stage
-            return
-        if self.future or not self.state:
+        if not self.state or (self.future and not self.polling):
             return
         if self.state["pending"] or self.state["hosting"]:
-            self.release()
+            if self.polling:
+                self.after_poll = self.release
+            else:
+                self.release()
             return
-        src = self.client.selected()
+        if not self.picker:
+            self.picker = HostSetup(self.window, self.request_stage, self.show_room)
+        self.picker.room_state(self.state)
+        self.picker.refresh()
+        self.frame.pack_forget()
+        self.picker.pack(fill="both", expand=True)
+
+    def show_room(self):
+        if self.after_poll == self.request_stage:
+            self.after_poll = None
+        self.picker.pack_forget()
+        self.frame.pack(fill="both", expand=True)
+
+    def request_stage(self):
+        if not self.picker or not self.picker.winfo_manager():
+            return
+        if self.polling:
+            self.after_poll = self.request_stage
+            return
+        if self.future or not self.state or self.pending or self.state["hosting"]:
+            return
+        src = self.picker.selected()
         if not src:
-            self.status.set("请在主窗口选中共享进程，再申请主持。")
             return
         try:
-            fmt = self.client.selected_format()
-        except ValueError as exc:
-            self.status.set(str(exc))
+            fmt = self.picker.selected_format()
+        except ValueError:
+            self.picker.validate()
             return
         self.selection = ShareSelection(src, fmt)
+        codec = self.picker.codec.get()
         payload = dict(source=src.name, rate=fmt.sample_rate, bits=fmt.bits_per_sample,
-                       codec="opus" if self.state["livekit"] and self.codec.get().startswith("Opus") else "pcm")
+                       codec="opus" if self.state["livekit"] and codec.startswith("Opus") else "pcm")
         if payload["codec"]=="opus":
-            payload["bitrate"] = int(self.codec.get().split()[1])*1000
+            payload["bitrate"] = int(codec.split()[1])*1000
+        self.show_room()
+        self.stage.state(["disabled"])
+        self.status.set("正在提交主持请求…")
         self.submit(lambda: self.api.request("stage/request", payload), self.render)
 
-    def release(self):
+    def release(self, message=None):
+        if not self.state["hosting"] and not self.state["pending"]:
+            return
         stream = (self.state["host"] or {}).get("stream", "")
+        if not message:
+            message = "已下台" if self.state["hosting"] else "已取消申请"
         self.selection = None
         self.stop_stream()
-        self.submit(lambda: self.api.request("stage/leave", {"stream": stream}), self.render)
+        self.stage.state(["disabled"])
+
+        def released(state):
+            self.render(state)
+            self.status.set(message)
+
+        self.submit(lambda: self.api.request("stage/leave", {"stream": stream}), released)
 
     def decide(self, action, applicant):
         if self.polling:
@@ -219,6 +281,9 @@ class OnlineRoom:
         self.submit(lambda: self.api.request("stage/" + action, data), self.render)
 
     def render(self, state):
+        previous = self.state
+        if self.state is None:
+            self.status.set("")
         self.state = state
         host = state["host"]
         settings = state["config"]
@@ -230,9 +295,8 @@ class OnlineRoom:
             else:
                 self.interval.set("5")
         self.intervals.configure(values=intervals)
-        if not state["livekit"]:
-            self.codec.set("无损 PCM")
-        self.codec_select.configure(state="readonly" if state["livekit"] and not state["hosting"] and not state["pending"] else "disabled")
+        if self.picker and self.picker.winfo_manager():
+            self.picker.room_state(state)
         rtc = bool(host and state["livekit"] and (host["codec"]=="opus" or self.receive.get()=="Opus")
                    and self.fallback_stream != host["stream"])
         if self.listener and (not self.want_listen or not host or self.listener.host["stream"] != host["stream"]
@@ -246,23 +310,35 @@ class OnlineRoom:
             self.stop_stream()
             self.stream = host["stream"]
             self.upload = RTCWorker(self.api, host, publish=True) if host["codec"] == "opus" else AudioUpload(self.api, self.stream)
-            self.capture = LocalCapture(self.client.dll, self.selection, self.upload.add)
+            self.capture = ProcessCapture(self.dll, self.selection, self.upload.add)
             self.upload.start()
             self.capture.start()
             self.status.set("正在共享 " + self.selection.source.name)
         elif not state["hosting"] and self.stream:
             self.stop_stream()
             self.status.set("本次主持已结束")
-        if self.pending and not state["pending"] and not state["hosting"]:
+        if state["pending"] and not self.pending:
+            self.status.set("已申请主持，等待现任主持接受。")
+        elif self.pending and not state["pending"] and not state["hosting"]:
             self.selection = None
             self.status.set("主持申请已结束")
         self.pending = state["pending"]
-        label = f"主持 {host['name']} · {host['source']} · {host['rate']/1000:g} kHz / {host['bits']}-bit" if host else "等待主持上台"
+        label = (f"主持 {host['name']} · {host['source']} · {host['rate']/1000:g} kHz / {host['bits']}-bit" if host
+                 else "正在等候下一位主持，开播后将自动收听" if self.want_listen else "等待主持上台")
         if host:
             label += f" · Opus {host['bitrate']//1000} kbps" if host["codec"]=="opus" else " · 无损 PCM"
         self.info.configure(text=f"{self.name}  ·  {state['members']} 人在线\n{label}")
-        self.listen.configure(text="停止收听" if self.want_listen else "收听", state="disabled" if state["hosting"] and not self.want_listen else "normal")
-        self.stage.configure(text="下台" if state["hosting"] else "取消申请" if self.pending else "申请主持" if host else "开始主持")
+        listen_label = "收听" if not self.want_listen else "停止收听" if host else "取消等候"
+        self.listen.configure(text=listen_label, state="disabled" if state["hosting"] and not self.want_listen else "normal")
+        self.sync.configure(state="normal" if self.listener else "disabled")
+        self.stage.configure(text="下台" if state["hosting"] else "取消申请" if self.pending else "申请主持" if host else "开始主持",
+                             state="normal")
+        if self.capture:
+            self.levels.grid()
+        else:
+            self.levels.grid_remove()
+        if previous and previous["requests"] == state["requests"]:
+            return
         for child in self.requests.winfo_children():
             child.destroy()
         for req in state["requests"]:
@@ -282,15 +358,17 @@ class OnlineRoom:
                 if isinstance(exc, RoomError) and exc.status == 401 and self.name:
                     self.logged_out(None)
                 self.status.set(str(exc))
-            self.next_poll = time.monotonic() + 1
+            self.next_poll = time.monotonic() + 1 if self.state else 0
             if self.after_poll:
                 action, self.after_poll = self.after_poll, None
                 if self.name:
                     action()
+        if self.capture:
+            levels = [f"{20 * math.log10(value):.1f}" if value > 0 else "−∞" for value in self.capture.levels]
+            self.levels.configure(text=f"输入电平　左 {levels[0]} dBFS　右 {levels[1]} dBFS" if self.capture.ready.is_set() else "正在打开音源…")
         if self.name and not self.future:
             if self.capture and (self.capture.error or self.upload.error):
-                self.status.set(self.capture.error or self.upload.error)
-                self.release()
+                self.release(self.capture.error or self.upload.error)
             elif self.listener and self.listener.error:
                 self.status.set(self.listener.error)
                 if isinstance(self.listener, RTCWorker):
@@ -324,4 +402,3 @@ class OnlineRoom:
             self.pool.submit(lambda: api.request("logout", {}) if api.cookie else None)
         self.pool.shutdown(wait=False)
         self.window.destroy()
-        self.client.online = None

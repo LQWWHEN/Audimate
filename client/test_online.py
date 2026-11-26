@@ -1,3 +1,4 @@
+import logging
 import os
 import secrets
 import subprocess
@@ -8,13 +9,15 @@ import tkinter as tk
 import unittest
 from contextlib import ExitStack
 from pathlib import Path
+from unittest.mock import patch
 from wsgiref.simple_server import make_server
 
 from host.capture.test_isolation import expect, start_process, write_tone
 from server.app import App
 from server.dev import ThreadedServer
 from server.test_app import Quiet
-from .__main__ import Client, DEFAULT_DLL
+from .__main__ import DEFAULT_DLL
+from .online import OnlineRoom
 from .network import API
 
 
@@ -22,6 +25,8 @@ class OnlineTest(unittest.TestCase):
     def test_desktop_register_login_capture_and_receive(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             path = Path(tmp)
+            stack.enter_context(patch.dict(os.environ, {"LOCALAPPDATA": str(path / "appdata")}))
+            stack.enter_context(patch.object(logging.getLogger("audimate.desktop"), "handlers", [logging.NullHandler()]))
             url = os.environ.get("AUDIMATE_TEST_URL")
             if not url:
                 http = make_server("127.0.0.1", 0, App(path/"room.db"), ThreadedServer, Quiet)
@@ -37,11 +42,10 @@ class OnlineTest(unittest.TestCase):
             expect(source, "ready")
             root = tk.Tk()
             root.withdraw()
-            client = Client(root, DEFAULT_DLL)
-            stack.callback(client.close)
-            client.open_online()
-            ui = client.online
-            ui.window.withdraw()
+            ui = OnlineRoom(root, DEFAULT_DLL)
+            stack.callback(ui.close)
+            self.assertIsNone(ui.picker)
+            self.assertIs(ui.window, root)
             def until(predicate, timeout=12):
                 end = time.monotonic() + timeout
                 while not predicate():
@@ -49,7 +53,6 @@ class OnlineTest(unittest.TestCase):
                     if time.monotonic() > end:
                         self.fail(ui.status.get())
                     time.sleep(.01)
-            client.tree.selection_set(next(row for row, src in client.rows.items() if src.pid == source.pid))
             ui.addr.set(url)
             ui.user.set("desktopQA_" + suffix)
             ui.password.set(password)
@@ -61,12 +64,41 @@ class OnlineTest(unittest.TestCase):
             ui.auth("login")
             until(lambda: ui.state is not None)
             self.assertIsNone(ui.state["host"], "测试需要空闲房间")
-            ui.toggle_stage()
+            self.assertIsNone(ui.picker)
+            ui.listen.invoke()
+            self.assertEqual(ui.listen.cget("text"), "取消等候")
+            ui.listen.invoke()
+            ui.settings_button.invoke()
+            self.assertEqual(ui.prefs.winfo_manager(), "grid")
+            ui.settings_button.invoke()
+            ui.stage.invoke()
+            picker = ui.picker
+            self.assertFalse(ui.frame.winfo_manager())
+            self.assertTrue(picker.action.instate(["disabled"]))
+            picker.tree.selection_set(next(row for row, src in picker.rows.items() if src.pid == source.pid))
+            root.update()
+            ui.show_room()
+            self.assertIsNone(ui.api.request("room")["host"])
+            ui.stage.invoke()
+            self.assertEqual(picker.selected().pid, source.pid)
+            picker.action.invoke()
             until(lambda: ui.stream)
+            self.assertFalse(picker.winfo_manager())
             peer = API(url)
             peer_name = "peerQA_" + suffix
             peer.request("register", {"name":peer_name, "password":password})
             stack.callback(peer.request, "logout", {})
+            peer_source = dict(source="测试音源", rate=48000, bits=16)
+
+            def decide_from_room(title):
+                peer.request("stage/request", peer_source)
+                until(lambda: ui.state["requests"])
+                row = ui.requests.winfo_children()[0]
+                next(widget for widget in row.winfo_children() if widget.cget("text") == title).invoke()
+                until(lambda: not ui.state["requests"])
+
+            decide_from_room("拒绝")
+            self.assertFalse(peer.request("room")["pending"])
             from array import array
             received = []
             livekit = ui.state["livekit"]
@@ -94,8 +126,7 @@ class OnlineTest(unittest.TestCase):
             self.assertIsNone(peer.request("room")["host"])
 
             from client.playback import Output
-            from unittest.mock import patch
-            peer_host = peer.request("stage/request", dict(source="测试音源", rate=48000, bits=16))["host"]
+            peer_host = peer.request("stage/request", peer_source)["host"]
             peer.request("audio?stream=" + peer_host["stream"], received[-1])
             until(lambda: ui.state["host"] and ui.state["host"]["stream"] == peer_host["stream"])
             written = []
@@ -105,6 +136,7 @@ class OnlineTest(unittest.TestCase):
                 return original_write(device, pcm)
             with patch.object(Output, "write", recording_write):
                 ui.toggle_listen()
+                initial_listener = ui.listener
                 last = 0
                 def playing():
                     nonlocal last
@@ -115,8 +147,41 @@ class OnlineTest(unittest.TestCase):
                 until(playing, timeout=30)
                 if livekit:
                     from .rtc import RTCWorker
-                    self.assertIsInstance(ui.listener, RTCWorker)
+                    self.assertIsInstance(ui.listener, RTCWorker, initial_listener.error)
                 else:
                     self.assertEqual(written[0], received[-1])
                 ui.toggle_listen()
-            peer.request("stage/leave", {"stream": peer_host["stream"]})
+
+            def apply_for_stage(custom=False):
+                ui.stage.invoke()
+                self.assertEqual(picker.action.cget("text"), "提交申请")
+                if custom:
+                    picker.quality.current(len(picker.quality_keys))
+                    picker.change_quality()
+                    picker.rate.set("88200")
+                    picker.depth.set("24")
+                    picker.codec.set("无损 PCM")
+                picker.action.invoke()
+                until(lambda: ui.pending)
+                self.assertIsNone(ui.capture)
+                return peer.request("room")["requests"][0]["id"]
+
+            apply_for_stage()
+            ui.stage.invoke()
+            until(lambda: not ui.pending)
+            req = apply_for_stage()
+            peer.request("stage/reject", {"stream": peer_host["stream"], "id": req})
+            until(lambda: not ui.pending)
+            req = apply_for_stage(custom=True)
+            peer.request("stage/accept", {"stream": peer_host["stream"], "id": req})
+            until(lambda: ui.capture and ui.capture.ready.is_set())
+            host = peer.request("room")["host"]
+            self.assertEqual((host["rate"], host["bits"], host["codec"]), (88200, 24, "pcm"))
+            decide_from_room("接受")
+            self.assertTrue(peer.request("room")["hosting"])
+            self.assertIsNone(ui.capture)
+            peer.request("stage/leave", {"stream": ui.state["host"]["stream"]})
+            until(lambda: ui.state["host"] is None)
+            ui.logout()
+            until(lambda: not ui.name)
+            self.assertIsNone(ui.picker)

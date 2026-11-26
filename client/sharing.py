@@ -1,4 +1,4 @@
-"""A local sharing selection and its capture lifetime, independent of room roles."""
+"""Read audio from the selected process for an authorized room publisher."""
 from dataclasses import dataclass
 import threading
 import time
@@ -13,9 +13,9 @@ class ShareSelection:
     audio_format: AudioFormat
 
 
-class LocalCapture(threading.Thread):
-    def __init__(self, dll, selection, on_block=None):
-        super().__init__(name="Audimate capture consumer")
+class ProcessCapture(threading.Thread):
+    def __init__(self, dll, selection, on_block):
+        super().__init__(name="Audimate room capture")
         self.dll = dll
         self.selection = selection
         self.on_block = on_block
@@ -35,9 +35,8 @@ class LocalCapture(threading.Thread):
                 scale = 1 << (fmt.bits_per_sample - 1)
                 while not self.cancel.is_set():
                     block = session.read(100)
-                    if block is not None:
-                        if self.on_block:
-                            self.on_block(block)
+                    if block is not None and not self.cancel.is_set():
+                        self.on_block(block)
                         samples = block.samples()
                         for channel in range(2):
                             peaks[channel] = max(peaks[channel], max(map(abs, samples[channel::2])))

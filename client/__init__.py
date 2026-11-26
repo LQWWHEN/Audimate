@@ -1,1 +1,1 @@
-"""Audimate local desktop client."""
+"""Audimate desktop music room."""

@@ -11,21 +11,37 @@ from unittest.mock import patch
 
 from host.capture.record import AudioFormat, Capture, QUALITY_PRESETS
 from host.capture.test_isolation import expect, start_process, write_tone
-from .__main__ import Client, DEFAULT_DLL
+from .__main__ import DEFAULT_DLL
+from .host_setup import HostSetup
 from .processes import ProcessSource, selected_process
+from .sharing import ProcessCapture, ShareSelection
 
 
 class SelectionTests(unittest.TestCase):
     def setUp(self):
         self.root = tk.Tk()
         self.root.withdraw()
-        self.app = Client(self.root, DEFAULT_DLL)
+        self.app = HostSetup(self.root, lambda: None, lambda: None)
+        self.app.pack()
+        self.workers = []
         self.root.update()
 
     def tearDown(self):
-        self.app.close()
-        if self.app.worker:
-            self.until(lambda: self.app.worker is None)
+        for worker in self.workers:
+            self.stop(worker)
+        self.root.destroy()
+
+    def capture(self):
+        selection = ShareSelection(self.app.selected(), self.app.selected_format())
+        worker = ProcessCapture(DEFAULT_DLL, selection, lambda block: None)
+        self.workers.append(worker)
+        worker.start()
+        return worker
+
+    def stop(self, worker):
+        worker.cancel.set()
+        worker.join(5)
+        self.assertFalse(worker.is_alive())
 
     def until(self, condition, timeout=12):
         deadline = time.monotonic() + timeout
@@ -51,7 +67,7 @@ class SelectionTests(unittest.TestCase):
         app = self.app
         one = ProcessSource(10, 100, "Music.exe", "第一首歌")
         two = ProcessSource(20, 200, "Music.exe", "第二首歌")
-        with patch("client.__main__.list_sources", return_value=[one, two]) as sources:
+        with patch("client.host_setup.list_sources", return_value=[one, two]) as sources:
             app.refresh_button.invoke()
             self.assertTrue(app.action.instate(["disabled"]))
             self.select_pid(two.pid)
@@ -93,28 +109,27 @@ class SelectionTests(unittest.TestCase):
 
             with patch("client.sharing.Capture", wraps=Capture) as native:
                 self.quality("studio")
-                app.action.invoke()
-                self.until(lambda: app.role.cget("text") == "本地主持" and min(app.worker.levels) > 0.001)
+                worker = self.capture()
+                self.until(lambda: min(worker.levels) > 0.001)
                 native.assert_called_with(DEFAULT_DLL, first.pid, QUALITY_PRESETS["studio"])
-                app.action.invoke()
-                self.until(lambda: app.worker is None)
-                self.assertEqual(app.role.cget("text"), "听众")
+                self.stop(worker)
 
                 app.search.set(str(second.pid))
                 self.select_pid(second.pid)
                 self.quality("custom")
                 app.rate.set("88200")
                 app.depth.set("32")
-                app.action.invoke()
-                self.until(lambda: app.worker and app.worker.levels[1] > 0.001)
+                worker = self.capture()
+                self.until(lambda: worker.levels[1] > 0.001)
                 native.assert_called_with(DEFAULT_DLL, second.pid, AudioFormat(88200, 32))
-                left, right = app.worker.levels
+                left, right = worker.levels
                 self.assertLess(left, right * 0.02)
                 second.stdin.close()
                 second.wait(5)
-                self.until(lambda: app.worker is None)
+                self.until(lambda: not worker.is_alive())
+                app.refresh()
                 self.assertIsNone(app.selected())
-                self.assertIn("0x8007042B", app.message.get())
+                self.assertIn("0x8007042B", worker.error)
                 self.assertTrue(app.action.instate(["disabled"]))
 
     def test_cancel_during_start_then_retry_after_error(self):
@@ -127,30 +142,26 @@ class SelectionTests(unittest.TestCase):
             release.wait(5)
             return nullcontext()
 
-        with patch("client.__main__.list_sources", return_value=[source]), \
+        with patch("client.host_setup.list_sources", return_value=[source]), \
              patch("client.sharing.selected_process", return_value=nullcontext()), \
              patch("client.sharing.Capture", side_effect=delayed_open) as native:
             app.refresh_button.invoke()
             self.select_pid(source.pid)
-            app.action.invoke()
+            worker = self.capture()
             self.until(entered.is_set)
-            self.assertEqual(app.role.cget("text"), "准备中")
-            app.action.invoke()
-            self.assertTrue(app.action.instate(["disabled"]))
+            worker.cancel.set()
             release.set()
-            self.until(lambda: app.worker is None)
-            self.assertEqual(app.role.cget("text"), "听众")
+            self.stop(worker)
+            self.assertFalse(worker.error)
             native.side_effect = OSError("测试音源不可用")
-            app.action.invoke()
-            self.until(lambda: app.worker is None)
-            self.assertIn("测试音源不可用", app.message.get())
-            self.assertTrue(app.action.instate(["!disabled"]))
+            worker = self.capture()
+            self.until(lambda: not worker.is_alive())
+            self.assertIn("测试音源不可用", worker.error)
             native.side_effect = None
             native.return_value.__enter__.return_value.read.side_effect = lambda _: time.sleep(0.02)
-            app.action.invoke()
-            self.until(lambda: app.role.cget("text") == "本地主持")
-            app.action.invoke()
-            self.until(lambda: app.worker is None)
+            worker = self.capture()
+            self.until(worker.ready.is_set)
+            self.stop(worker)
 
 
 if __name__ == "__main__":
