@@ -20,6 +20,8 @@ async function run() {
   assert.equal(one.parts.unknown,200);
   assert.equal(one.parts.residence/one.total,.3);
   assert.equal(calc("slowest").chosen.peer,"b");
+  assert.equal(summarizeLatency(rows,"slowest","pcm","",65,new Set(["a"])).chosen.peer,"a");
+  assert.equal(summarizeLatency(rows,"slowest","pcm","",65,new Set()).count,0);
   assert.equal(calc("peer","pcm","a").count,2);
   assert.equal(calc("path","rtc").count,0);
   assert.equal(summarizeLatency(rows,"path","pcm","",90).count,1);

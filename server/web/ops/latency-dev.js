@@ -39,9 +39,10 @@ function breakdown(r, sender) {
   return parts;
 }
 
-export function summarizeLatency(samples, view, path, peer, since=-Infinity) {
+export function summarizeLatency(samples, view, path, peer, since=-Infinity, onlinePeers) {
   // Samples are newest first. A reconnect using the same account has a distinct peer ID.
-  const plays = samples.filter(r=>r.time>since && r.role==="listener" && r.peer && (r.event==="play" || r.event==="gap"));
+  const plays = samples.filter(r=>r.time>since && r.role==="listener" && r.peer && (r.event==="play" || r.event==="gap") &&
+    (view!=="slowest" || !onlinePeers || onlinePeers.has(r.peer)));
   const latest = new Map();
   for (const r of plays) if (!latest.has(r.peer)) latest.set(r.peer,r);
   let selectedPeer = peer;
@@ -139,7 +140,8 @@ function refreshPie() {
   populate(peer,entries);
   path.parentElement.hidden=view!=="path"; peer.parentElement.hidden=view!=="peer";
   path.disabled=!host; peer.disabled=!host || !entries.length;
-  const res=summarizeLatency(samples,view,path.value,peer.value,now-seconds);
+  const onlinePeers=view==="slowest" ? new Set(snapshot.members.map(m=>m.peer)) : null;
+  const res=summarizeLatency(samples,view,path.value,peer.value,now-seconds,onlinePeers);
   paint(panel,res);
   let status;
   if (!host) status="房间空席，等待下一轮主持";

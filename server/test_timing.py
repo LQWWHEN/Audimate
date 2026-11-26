@@ -79,6 +79,7 @@ class DevelopmentTiming(TimingCase):
         self.assertNotIn("queue_ms", snap["samples"][0]["detail"])
         self.assertEqual(snap["samples"][0]["round_id"], snap["timing"]["round_id"])
         self.assertEqual(snap["samples"][0]["role"], "listener")
+        self.assertIn(snap["samples"][0]["peer"], [m["peer"] for m in snap["members"] if not m["host"]])
 
         self.ops("service/logging", {"logging":"errors"})
         self.alice.request(f"audio?stream={stream}&packet=12", bytes(120))

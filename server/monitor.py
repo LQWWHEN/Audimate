@@ -254,6 +254,8 @@ class Monitor:
             members.append(dict(name=member.name, client=member.client, host=is_host, pulling=listening,
                                 joined_s=int(now - member.joined), seen_s=int(now - member.seen),
                                 pending=key in room.pending, rx=member.uploaded, tx=member.downloaded))
+            if self.development:
+                members[-1]["peer"] = member.peer_id
         members.sort(key=lambda m: (not m["host"], m["name"]))
         stream = None
         if host:
