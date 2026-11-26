@@ -1,0 +1,1 @@
+"""Audimate local desktop client."""

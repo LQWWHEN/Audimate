@@ -1,0 +1,7 @@
+/build/
+__pycache__/
+/-
+/PROJECT_CONTEXT.local.md
+.env
+.env.*
+!.env.example
