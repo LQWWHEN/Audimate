@@ -68,7 +68,7 @@ async function startWindowPlayers(directory) {
     const target = await start(700, title);
     await start(1800, "");
     return {
-      args: ["--auto-select-window-capture-source-by-title=" + title, "--system-audio-capture-default_checked"],
+      args: ["--auto-select-window-capture-source-by-title=" + title],
       pause: () => target.stdin.write("pause\n"),
       setMinimized(minimized) {
         return new Promise((resolve, reject) => {

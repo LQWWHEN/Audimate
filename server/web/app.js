@@ -190,6 +190,8 @@ function render(state) {
         ? "申请主持"
         : "主持 · 共享音频";
   $("stage").disabled = room.pending || requesting || leaving;
+  $("chooseSourceHelp").hidden = room.hosting || room.pending;
+  $("stopSourceHelp").hidden = !room.hosting;
   $("cancel").hidden = !room.pending;
   $("cancel").disabled = leaving;
   $("quality").disabled = room.hosting || room.pending || requesting;
@@ -286,6 +288,7 @@ $("stage").onclick = async () => {
     const chosen = await navigator.mediaDevices.getDisplayMedia({
       video: { displaySurface: "window" },
       audio: true,
+      audioSelection: "preferred",
       windowAudio: "window",
       systemAudio: "exclude",
       monitorTypeSurfaces: "exclude",

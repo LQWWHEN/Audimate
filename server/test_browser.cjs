@@ -194,8 +194,9 @@ async function run() {
       assert.equal(requests, 0);
     }
     assert.deepEqual(await host.evaluate(() => [
-      captureOptions.windowAudio, captureOptions.systemAudio, captureOptions.monitorTypeSurfaces
-    ]), ["window", "exclude", "exclude"]);
+      captureOptions.audio, captureOptions.audioSelection, captureOptions.windowAudio,
+      captureOptions.systemAudio, captureOptions.monitorTypeSurfaces
+    ]), [true, "preferred", "window", "exclude", "exclude"]);
     if (windowPlayers) {
       await host.evaluate(picker => navigator.mediaDevices.getDisplayMedia = picker, originalPicker);
       await host.bringToFront();
@@ -206,6 +207,7 @@ async function run() {
     await host.waitForFunction(
       () => document.querySelector("#stage").textContent === "下台",
     );
+    assert.ok(await host.isVisible("#stopSourceHelp"));
     await listener.waitForFunction(
       () => !document.querySelector("#listen").disabled,
     );
@@ -308,6 +310,7 @@ async function run() {
       releaseLeave();
     }
     await host.waitForFunction(() => !room.hosting && !document.querySelector("#stage").disabled);
+    assert.ok(await host.isVisible("#chooseSourceHelp"));
     await host.click("#stage");
     if (windowPlayers) {
       // A minimized window can be absent from the native picker. Keep it open

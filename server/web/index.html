@@ -84,7 +84,10 @@
           <button id="stage" class="primary" disabled aria-describedby="shareHelp">主持 · 共享音频</button
           ><button id="cancel" class="quiet" hidden>取消申请</button>
         </div>
-        <p id="shareHelp">分享桌面播放器时，选择它的窗口并勾选共享应用音频。如果找不到播放器，请从任务栏或托盘还原窗口，再在「窗口」列表中选择。分享网页音乐时，选择播放中的标签页并勾选共享音频。</p>
+        <p id="shareHelp">
+          <span id="chooseSourceHelp">选择播放器窗口或音乐标签页后点击「共享」。如果音频未预选，请勾选共享音频。找不到播放器时，请从任务栏或托盘还原窗口。</span>
+          <span id="stopSourceHelp" hidden>点「下台」即可停止共享。如果浏览器浮窗上有「隐藏」，可以点它收起浮窗，音乐会继续播放。</span>
+        </p>
         <div id="requests"></div></section></div>
       </section>
       <p id="notice" role="status" aria-live="polite"></p>

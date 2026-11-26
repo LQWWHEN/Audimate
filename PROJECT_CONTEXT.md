@@ -25,7 +25,7 @@ Windows 桌面端启动即进入登录页，登录、收听、主持设置和审
 
 **桌面播放器。** 主持人选择应用后，Windows 采集模块用 WASAPI Application Loopback 的 `PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE` 模式捕获目标 PID 及其子进程。若播放器委托进程树之外的服务发声，或内容受保护，可能只能得到静音。界面应显示所选来源和实时电平；捕获失败时提示重新选源。默认输出设备的全局回环会混入其他应用声音，不能作为自动回退方式。微软样例给出的最低系统构建号为 20348，首版建议以 Windows 11 实机验证。[微软按进程采音样例](https://learn.microsoft.com/en-us/samples/microsoft/windows-classic-samples/applicationloopbackaudio-sample/) · [回环录音与受保护内容](https://learn.microsoft.com/en-us/windows/win32/coreaudio/loopback-recording)
 
-**网页采音。** 主持人通过 `getDisplayMedia()` 选择应用窗口或音乐标签页，在选择器中勾选对应音频。网页请求 `windowAudio: "window"`，发布前校验音轨。对于窗口，Chromium 可能回退到系统混音，因此只接受其明确标记为 `Application Audio` 的音轨。窗口模式采集所属应用的声音；同一浏览器里要隔离某个音乐网页时，应选具体标签页。只上传音频。[Chromium 音轨标记实现](https://chromium.googlesource.com/chromium/src/+/refs/tags/158.0.8127.37/chrome/browser/media/webrtc/desktop_capture_devices_util.cc)
+**网页采音。** 主持人通过 `getDisplayMedia()` 选择应用窗口或音乐标签页。网页用 `audioSelection: "preferred"` 请求预选音频，用 `windowAudio: "window"` 请求应用独立音轨。Windows Chrome 158 已在原生选择器默认设置下验证可直接共享应用音频。浏览器保留用户的最终选择和停止共享入口，房间点「下台」会停止采集与上传。对于窗口，Chromium 可能回退到系统混音，因此只接受其明确标记为 `Application Audio` 的音轨。同一浏览器里要隔离某个音乐网页时，应选具体标签页。只上传音频。[音频选择偏好](https://w3c.github.io/mediacapture-screen-share/#dom-displaymediastreamoptions-audioselection) · [Chromium 音轨标记实现](https://chromium.googlesource.com/chromium/src/+/refs/tags/158.0.8127.37/chrome/browser/media/webrtc/desktop_capture_devices_util.cc)
 
 **媒体路径。** 主持上传一条 LiveKit Opus 音轨或一份所选格式的 PCM。Opus 由 SFU 分发，媒体桥接保留该轮解码历史。PCM 保留原始采样，第一位请求 Opus 的听众触发共享编码。网页和桌面均可持续等候新主持，网络中断可走缓冲读取。缓存按音频时长和包龄双重裁剪，默认 5 秒，每轮主持隔离。
 
