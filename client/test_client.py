@@ -13,8 +13,35 @@ from host.capture.record import AudioFormat, Capture, QUALITY_PRESETS
 from host.capture.test_isolation import expect, start_process, write_tone
 from .__main__ import DEFAULT_DLL
 from .host_setup import HostSetup
-from .processes import ProcessSource, selected_process
+from .processes import ProcessSource, current_track, selected_process, track_from_title
 from .sharing import ProcessCapture, ShareSelection
+
+
+class TrackTests(unittest.TestCase):
+    def test_netease_captions(self):
+        expected = {"title": "夜曲 (Live)", "artist": "A-Lin / 歌手乙"}
+        for caption in ("夜曲 (Live) - A-Lin / 歌手乙", "夜曲 (Live) – A-Lin / 歌手乙 - 网易云音乐"):
+            self.assertEqual(track_from_title("CloudMusic.EXE", caption), expected)
+        for caption in ("网易云音乐", "首页 - 网易云音乐", "网易云音乐 - 登录", "夜曲 - ", "甲 - 乙 - 丙"):
+            self.assertIsNone(track_from_title("cloudmusic.exe", caption))
+        self.assertIsNone(track_from_title("editor.exe", "document - editor"))
+        self.assertEqual(track_from_title("player.exe", "《夜曲》 - 歌手"), {"title": "夜曲", "artist": "歌手"})
+
+    def test_only_unambiguous_titles_of_selected_process(self):
+        src = ProcessSource(123, 456, "cloudmusic.exe", "旧歌 - 旧歌手")
+        titles = {123: ["网易云音乐", "新歌 - 歌手"], 456: ["别的歌 - 别的歌手"]}
+        with patch("client.processes.selected_process", return_value=nullcontext()), \
+             patch("client.processes.window_titles", return_value=titles) as windows:
+            self.assertEqual(current_track(src), {"title": "新歌", "artist": "歌手"})
+            windows.assert_called_once_with(src.pid)
+            titles[123].append("另一首 - 歌手")
+            self.assertIsNone(current_track(src))
+            titles.pop(123)
+            self.assertIsNone(current_track(src))
+        with patch("client.processes.selected_process", side_effect=OSError), \
+             patch("client.processes.window_titles") as windows:
+            self.assertIsNone(current_track(src))
+            windows.assert_not_called()
 
 
 class SelectionTests(unittest.TestCase):

@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import secrets
@@ -12,7 +13,7 @@ from pathlib import Path
 from unittest.mock import patch
 from wsgiref.simple_server import make_server
 
-from host.capture.test_isolation import expect, start_process, write_tone
+from host.capture.test_isolation import start_process, write_tone
 from server.app import App
 from server.dev import ThreadedServer
 from server.test_app import Quiet
@@ -38,8 +39,11 @@ class OnlineTest(unittest.TestCase):
             password = secrets.token_urlsafe(24)
             wav = path/"target.wav"
             write_tone(wav, 0, 900)
-            source = start_process(stack, "--player", wav)
-            expect(source, "ready")
+            source = start_process(stack, "--window-player", wav)
+            player_pid = int(source.stdout.readline())
+            def caption(text):
+                source.stdin.write(json.dumps(text) + "\n")
+                source.stdin.flush()
             root = tk.Tk()
             root.withdraw()
             ui = OnlineRoom(root, DEFAULT_DLL)
@@ -75,12 +79,12 @@ class OnlineTest(unittest.TestCase):
             picker = ui.picker
             self.assertFalse(ui.frame.winfo_manager())
             self.assertTrue(picker.action.instate(["disabled"]))
-            picker.tree.selection_set(next(row for row, src in picker.rows.items() if src.pid == source.pid))
+            picker.tree.selection_set(next(row for row, src in picker.rows.items() if src.pid == player_pid))
             root.update()
             ui.show_room()
             self.assertIsNone(ui.api.request("room")["host"])
             ui.stage.invoke()
-            self.assertEqual(picker.selected().pid, source.pid)
+            self.assertEqual(picker.selected().pid, player_pid)
             picker.action.invoke()
             until(lambda: ui.stream)
             self.assertFalse(picker.winfo_manager())
@@ -89,6 +93,18 @@ class OnlineTest(unittest.TestCase):
             peer.request("register", {"name":peer_name, "password":password})
             stack.callback(peer.request, "logout", {})
             peer_source = dict(source="测试音源", rate=48000, bits=16)
+            original_stream = ui.stream
+            original_capture = ui.capture
+            process_name = ui.selection.source.name
+            for title, expected in (("《第一首》 - 歌手甲", "第一首 - 歌手甲"),
+                                    ("Audimate test player", process_name),
+                                    ("《第二首》 - 歌手乙", "第二首 - 歌手乙")):
+                caption(title)
+                until(lambda: ui.state["host"]["source"] == expected)
+                self.assertIn(expected, ui.info.cget("text"))
+                self.assertEqual(peer.request("room")["host"]["source"], expected)
+                self.assertEqual(ui.stream, original_stream)
+                self.assertIs(ui.capture, original_capture)
 
             def decide_from_room(title):
                 peer.request("stage/request", peer_source)
@@ -113,7 +129,8 @@ class OnlineTest(unittest.TestCase):
             self.assertGreater(max(map(abs,samples[1::2])), 50)
             self.assertLess(max(map(abs,samples[::2])), 100 if livekit else 8)
             if os.environ.get("AUDIMATE_BROWSER_PEER") == "1":
-                env = dict(os.environ, AUDIMATE_TEST_URL=url, AUDIMATE_PEER_NAME=peer_name, AUDIMATE_PEER_PASSWORD=password)
+                env = dict(os.environ, AUDIMATE_TEST_URL=url, AUDIMATE_PEER_NAME=peer_name,
+                           AUDIMATE_PEER_PASSWORD=password, AUDIMATE_PEER_TRACK="第二首 - 歌手乙")
                 with subprocess.Popen(["node", "server/test_browser.cjs", "--desktop-listener"], env=env) as browser:
                     try:
                         until(lambda: browser.poll() is not None, timeout=45)
@@ -129,6 +146,8 @@ class OnlineTest(unittest.TestCase):
             peer_host = peer.request("stage/request", peer_source)["host"]
             peer.request("audio?stream=" + peer_host["stream"], received[-1])
             until(lambda: ui.state["host"] and ui.state["host"]["stream"] == peer_host["stream"])
+            peer.request("stage/track", {"stream": peer_host["stream"], "track": {"title": "听众测试", "artist": "歌手甲"}})
+            until(lambda: "听众测试 - 歌手甲" in ui.info.cget("text"))
             written = []
             original_write = Output.write
             def recording_write(device, pcm):

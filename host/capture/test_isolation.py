@@ -3,6 +3,7 @@ import argparse
 from array import array
 from contextlib import ExitStack
 import math
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -39,6 +40,24 @@ def player(path):
         if command.strip() == "pause":
             winsound.PlaySound(None, 0)
             print("paused", flush=True)
+
+
+def window_player(path):
+    """Playback fixture whose title can change while the same PID keeps playing."""
+    import json
+    import threading
+    import tkinter as tk
+    import winsound
+    window = tk.Tk()
+    window.title("Audimate test player")
+    winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_LOOP)
+    def read_titles():
+        for line in sys.stdin:
+            window.after(0, window.title, json.loads(line))
+        window.after(0, window.destroy)
+    threading.Thread(target=read_titles, daemon=True).start()
+    window.after(0, lambda: print(os.getpid(), flush=True))
+    window.mainloop()
 
 
 def measure(session):
@@ -197,6 +216,8 @@ def verify(dll):
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--player"]:
         player(sys.argv[2])
+    elif sys.argv[1:2] == ["--window-player"]:
+        window_player(sys.argv[2])
     elif sys.argv[1:2] == ["--parent"]:
         parent_player(sys.argv[2])
     else:

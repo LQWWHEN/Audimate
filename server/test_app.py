@@ -91,6 +91,29 @@ class Integration(unittest.TestCase):
             self.app.room.members[key].seen -= LEASE + 1
         self.assertIsNone(self.bob.request("room")["host"])
 
+    def test_track_follows_the_current_stream(self):
+        self.register(self.alice, "主持甲")
+        self.register(self.bob, "听众乙")
+        original = self.alice.request("stage/request", self.choice)["host"]
+        stream = original["stream"]
+        change = {"stream": stream, "track": {"title": "夜曲", "artist": "周杰伦"}}
+        with self.assertRaisesRegex(OSError, "403"):
+            self.bob.request("stage/track", change)
+        self.alice.request("stage/track", change)
+        host = self.bob.request("room")["host"]
+        self.assertEqual((host["stream"], host["source"], host["track"]), (stream, "夜曲 - 周杰伦", change["track"]))
+        for track in ({}, {"title": "下一首", "artist": ""}, {"title": "a"*161, "artist": "b"},
+                      {"title": "\ud800", "artist": "b"}, "raw caption"):
+            with self.assertRaisesRegex(OSError, "400"):
+                self.alice.request("stage/track", dict(change, track=track))
+        cleared = self.alice.request("stage/track", dict(change, track=None))["host"]
+        self.assertEqual(cleared["source"], self.choice["source"])
+        self.alice.request("stage/track", change)
+        self.alice.request("stage/leave", {"stream": stream})
+        self.assertIsNone(self.alice.request("stage/request", self.choice)["host"]["track"])
+        with self.assertRaisesRegex(OSError, "409"):
+            self.alice.request("stage/track", change)
+
     def test_web_origin_and_files(self):
         con = http.client.HTTPConnection(API(self.url).url.netloc)
         try:

@@ -132,7 +132,7 @@ class Room:
 
     def grant(self, key, choice):
         self.reset()
-        self.host = dict(choice, key=key, stream=secrets.token_hex(12))
+        self.host = dict(choice, key=key, stream=secrets.token_hex(12), track=None)
         self.stage_since = time.monotonic()
         if not self.watching:
             self.watching = True
@@ -144,7 +144,10 @@ class Room:
     def status(self, key):
         host = self.host
         mine = bool(host and host["key"] == key)
-        return {"host": {k: v for k, v in host.items() if k != "key"} if host else None,
+        public_host = {k: v for k, v in host.items() if k != "key"} if host else None
+        if host and host["track"]:
+            public_host["source"] = f"{host['track']['title']} - {host['track']['artist']}"
+        return {"host": public_host,
                 "hosting": mine, "pending": key in self.pending,
                 "requests": [{"id": req["id"], "name": req["name"]} for req in self.pending.values()] if mine else [],
                 "members": len(self.members), "livekit": self.media.enabled}
@@ -170,6 +173,19 @@ class Room:
             elif self.host["key"] != key and key not in self.pending:
                 self.pending[key] = choice
                 self.monitor.event("主持", f"{name} 申请主持")
+        elif action == "track":
+            if not self.host or self.host["stream"] != data.get("stream"):
+                raise Problem(409, "主持已变更")
+            if self.host["key"] != key:
+                raise Problem(403, "仅主持可更新曲目")
+            track = data.get("track", {})
+            if track is not None:
+                if not isinstance(track, dict) or set(track) != {"title", "artist"} or any(
+                        not isinstance(s, str) or not s.strip() or len(s) > 160 or
+                        not s.isprintable() for s in track.values()):
+                    raise Problem(400, "曲目需要有效的歌名和歌手")
+                track = {k: v.strip() for k, v in track.items()}
+            self.host["track"] = track
         elif action == "leave":
             # A delayed stop from a former stream must not stop a new one.
             if self.host and self.host["key"] == key and self.host["stream"] == data.get("stream"):
@@ -343,7 +359,8 @@ class App:
             data = fields(env)
         room = self.room
         room_read = path == "/api/room" and method == "GET"
-        stage_write = path in ("/api/stage/request", "/api/stage/leave", "/api/stage/accept", "/api/stage/reject") and method == "POST"
+        stage_write = path in ("/api/stage/request", "/api/stage/leave", "/api/stage/accept",
+                               "/api/stage/reject", "/api/stage/track") and method == "POST"
         audio_request = path == "/api/audio" and method in ("GET", "POST")
         media_request = path in ("/api/media", "/api/diagnostics") and method == "POST"
         clock_read = path == "/api/clock" and method == "GET"

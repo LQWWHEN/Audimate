@@ -5,6 +5,7 @@ from ctypes import wintypes as wt
 from dataclasses import dataclass
 import ntpath
 import os
+import re
 
 
 @dataclass(frozen=True)
@@ -72,21 +73,54 @@ def selected_process(source):
         yield
 
 
-def window_titles():
+def window_titles(only_pid=None):
     titles = {}
     text = ct.create_unicode_buffer(512)
 
     @window_callback
     def collect(hwnd, _):
-        if visible(hwnd) and window_text(hwnd, text, len(text)):
+        if visible(hwnd):
             pid = wt.DWORD()
             window_pid(hwnd, ct.byref(pid))
-            titles.setdefault(pid.value, text.value)
+            if (only_pid is None or pid.value == only_pid) and window_text(hwnd, text, len(text)):
+                titles.setdefault(pid.value, []).append(text.value)
         return True
 
     if not enum_windows(collect, 0):
         raise ct.WinError(ct.get_last_error())
     return titles
+
+
+def track_from_title(process_name, caption):
+    """NetEase uses title - artist. Elsewhere require explicit song notation."""
+    parts = re.split(r"\s+[-–—]\s+", " ".join(caption.split()))
+    netease = process_name.casefold() == "cloudmusic.exe"
+    player_names = {"网易云音乐", "网易云音乐播放器", "netease cloud music"}
+    if netease and parts[-1].casefold() in player_names:
+        parts.pop()
+    if len(parts) != 2:
+        return None
+    title, artist = parts
+    if title.startswith("《") and title.endswith("》"):
+        title = title[1:-1].strip()
+    elif not netease:
+        return None
+    if any(not value or len(value) > 160 or not value.isprintable() or
+           value.casefold() in player_names for value in (title, artist)):
+        return None
+    return {"title": title, "artist": artist}
+
+
+def current_track(source):
+    try:
+        with selected_process(source):
+            captions = window_titles(source.pid).get(source.pid, ())
+    except OSError:
+        return None
+    tracks = [track for caption in captions if (track := track_from_title(source.name, caption))]
+    if tracks and all(track == tracks[0] for track in tracks):
+        return tracks[0]
+    return None
 
 
 def list_sources():
@@ -115,7 +149,7 @@ def list_sources():
                 length = wt.DWORD(len(path))
                 if image_name(handle, 0, path, ct.byref(length)):
                     sources.append(ProcessSource(pid, creation_time(handle), ntpath.basename(path.value),
-                                                 titles.get(pid, "")))
+                                                 titles[pid][0] if pid in titles else ""))
         except OSError:
             continue  # Protected or exited between enumeration and inspection.
     return sorted(sources, key=lambda src: (not src.title, src.name.casefold(), src.pid))

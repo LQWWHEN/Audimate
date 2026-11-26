@@ -11,6 +11,7 @@ from tkinter import ttk
 
 from .network import API, default_server, AudioListener, AudioUpload, RoomError
 from .host_setup import HostSetup
+from .processes import current_track
 from .sharing import ProcessCapture, ShareSelection
 
 
@@ -280,6 +281,17 @@ class OnlineRoom:
         data = {"id": applicant, "stream": self.stream}
         self.submit(lambda: self.api.request("stage/" + action, data), self.render)
 
+    def poll_host(self, host, source):
+        track = current_track(source)
+        if track != host["track"]:
+            try:
+                return self.api.request("stage/track", {"stream": host["stream"], "track": track})
+            except RoomError as exc:
+                if exc.status not in (403, 409):
+                    raise
+                # A handoff took place since the last poll.
+        return self.api.request("room")
+
     def render(self, state):
         previous = self.state
         if self.state is None:
@@ -313,7 +325,7 @@ class OnlineRoom:
             self.capture = ProcessCapture(self.dll, self.selection, self.upload.add)
             self.upload.start()
             self.capture.start()
-            self.status.set("正在共享 " + self.selection.source.name)
+            self.status.set("正在共享音频")
         elif not state["hosting"] and self.stream:
             self.stop_stream()
             self.status.set("本次主持已结束")
@@ -389,8 +401,13 @@ class OnlineRoom:
                     self.release()
                 else:
                     self.polling = True
-                    route = "room?listen="+self.listener.host["stream"] if self.listener and getattr(self.listener,"subscribed",False) else "room"
-                    self.submit(lambda: self.api.request(route), self.render)
+                    host = self.state and self.state["host"]
+                    if self.capture and self.capture.ready.is_set() and host and "track" in host:
+                        source = self.selection.source
+                        self.submit(lambda: self.poll_host(host, source), self.render)
+                    else:
+                        route = "room?listen="+self.listener.host["stream"] if self.listener and getattr(self.listener,"subscribed",False) else "room"
+                        self.submit(lambda: self.api.request(route), self.render)
         self.tick_id = self.window.after(80, self.tick)
 
     def close(self):

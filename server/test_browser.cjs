@@ -28,6 +28,8 @@ async function listenToDesktop(page, url) {
     process.env.AUDIMATE_PEER_PASSWORD,
     false,
   );
+  if (process.env.AUDIMATE_PEER_TRACK)
+    await page.waitForFunction(text => document.querySelector("#source").textContent === text, process.env.AUDIMATE_PEER_TRACK);
   await page.evaluate(() => {
     const start = AudioBufferSourceNode.prototype.start;
     AudioBufferSourceNode.prototype.start = function (...args) {
