@@ -1,12 +1,12 @@
 # Audimate Windows 客户端
 
-在 Windows 上从仓库根目录运行。需要 x64 Python 3（含 Tkinter）和位数一致的采音 DLL。本机默认构建位于 `build/Release/audimate_capture.dll`；其他构建目录可通过 `--dll` 指定。
+需要 x64 Python 3（含 Tkinter）和位数一致的采音 DLL。启动脚本会创建或复用项目的 `build/rtc-env`，在这个环境中安装桌面依赖，再使用同一个解释器启动客户端。可在资源管理器中双击 `client/start.cmd`，也可在仓库根目录的 PowerShell 中运行以下命令。
 
 ```powershell
-python -m pip install -r client/requirements.txt
-python -m client
-python -m client --dll build/msvc-x64/Release/audimate_capture.dll
+.\client\start.cmd
 ```
+
+默认使用 `build/Release/audimate_capture.dll`，其他构建可用 `.\client\start.cmd --dll 路径` 指定。使用自选 Python 或 VS Code 时，选择 `build/rtc-env/Scripts/python.exe`；也可以在自选解释器中执行 `python -m pip install -r client/requirements.txt`，再用同一解释器运行 `python -m client`。
 
 启动后，在登录页填写房间服务地址并登录，也可以注册后直接进入房间。桌面端和网页端共用账号。服务地址默认取自环境变量 `AUDIMATE_SERVER`，其次是本机的 `client/server.local.txt`，未配置时使用 `http://127.0.0.1:17881`。[房间服务与网页使用说明](../server/README.md)
 

@@ -1,6 +1,7 @@
 """Native LiveKit endpoint. All SDK and audio device work stays off the Tk thread."""
 import asyncio
 import queue
+import sys
 import threading
 import time
 
@@ -34,9 +35,14 @@ class RTCWorker(threading.Thread):
                 self.error = "LiveKit · " + str(exc)
 
     async def connect(self):
-        from livekit import rtc
+        try:
+            from livekit import rtc
+        except ImportError as exc:
+            raise RuntimeError(
+                f"当前 Python 无法加载 LiveKit（{sys.executable}）。"
+                f"请从项目根目录运行 client\\start.cmd 后重试。\n{exc}"
+            ) from exc
         from server.rtc_audio import FrameConverter, publish_source
-        from .playback import Output
         session = rtc.Room()
         await asyncio.to_thread(self.api.calibrate)
         grant = await asyncio.to_thread(self.api.request, "media", {
@@ -49,6 +55,8 @@ class RTCWorker(threading.Thread):
                 tracks.put_nowait(track)
 
         async def listen(track):
+            from .playback import Output
+
             stream = rtc.AudioStream.from_track(track=track, sample_rate=48000, num_channels=2, capacity=30, frame_size_ms=20)
             try:
                 with Output(48000, 16) as output:
