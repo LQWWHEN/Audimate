@@ -1,6 +1,6 @@
 # Audimate 项目上下文
 
-最近更新于 2026-11-26。Windows 本地客户端已接入 C++ 进程采音，支持选择共享进程与音质、查看左右声道电平和主动下台。当前单用户原型采用 Python 标准库 Tkinter；多人房间、主持申请与审批、媒体发布和听众播放仍待实现。[本地客户端运行与测试](client/README.md) · [项目仓库](https://github.com/LQWWHEN/Audimate.git)
+最近更新于 2026-11-27。Windows 本地客户端已接入 C++ 进程采音，支持选择共享进程与音质、查看左右声道电平和主动下台。当前单用户原型采用 Python 标准库 Tkinter；多人房间、主持申请与审批、媒体发布和听众播放仍待实现。[本地客户端运行与测试](client/README.md) · [项目仓库](https://github.com/LQWWHEN/Audimate.git)
 
 ## 产品目标与已确认需求
 
@@ -44,7 +44,7 @@ Audimate 用于 20 人以下的 PC 实时音乐共享。主持人从自己的电
 
 ## 测试环境
 
-阿里云功能联调机运行 Alibaba Cloud Linux 3.2104 U10（x86_64），配有 2 vCPU、896 MiB 系统可见内存和 30 GiB 根分区。2026-11-26 已验证 SSH 公钥登录，Docker Engine 26.1.3 和 Compose v2.27.0 可用，当时尚无部署容器。公网出口、媒体 UDP 连通性、TURN/TLS 回退和满房容量待验证。当前维护机上的连接方式与指纹记录在仓库根目录的本地文件 `PROJECT_CONTEXT.local.md` 中。
+2026-11-27 阿里云功能联调机重置后，已核对新主机指纹并验证 SSH 公钥登录。当前系统为 Ubuntu 24.04.2 LTS（x86_64），配有 2 vCPU、894 MiB 系统可见内存和 30 GiB 根分区。Python 3.12.3 可用；核对时未检测到 Docker 命令，按容器方案部署前需准备 Docker Engine 和 Compose。公网出口、媒体 UDP 连通性、TURN/TLS 回退和满房容量待验证。当前维护机上的连接方式与指纹记录在仓库根目录的本地文件 `PROJECT_CONTEXT.local.md` 中。
 
 ## GitHub 留档约定
 
