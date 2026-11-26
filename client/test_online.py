@@ -9,8 +9,9 @@ import time
 import tkinter as tk
 import unittest
 from contextlib import ExitStack
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from wsgiref.simple_server import make_server
 
 from host.capture.test_isolation import start_process, write_tone
@@ -19,10 +20,84 @@ from server.dev import ThreadedServer
 from server.test_app import Quiet
 from .__main__ import DEFAULT_DLL
 from .online import OnlineRoom
-from .network import API
+from .network import API, AudioUpload
+
+
+class UploadTests(unittest.TestCase):
+    def test_keepalive_and_missing_acknowledgement(self):
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                packet = self.rfile.read(int(self.headers["Content-Length"]))
+                received.append((packet, self.client_address, self.headers.get("Cookie")))
+                if packet == b"lost acknowledgement":
+                    self.close_connection = True
+                    return
+                self.send_response(403 if packet == b"revoked" else 200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            api = API(f"http://127.0.0.1:{server.server_port}")
+            api.offset, api.cookie = 0, "audimate=test"
+            upload = AudioUpload(api, "test-stream")
+            packets = [b"first", b"lost acknowledgement", b"next", b"revoked"]
+            with patch.object(api, "calibrate"), patch.object(api, "report") as report:
+                upload.start()
+                try:
+                    for packet in packets:
+                        upload.packets.put((packet, time.time() * 1000), timeout=3)
+                    upload.join(5)
+                    self.assertFalse(upload.is_alive())
+                    self.assertIn("HTTP 403", upload.error)
+                    report.assert_any_call(upload.stream, "error", "pcm", {"unconfirmed": 1})
+                finally:
+                    upload.cancel.set()
+                    upload.join(7)
+                    server.shutdown()
+        self.assertEqual([packet for packet, _, _ in received], packets)
+        self.assertTrue(all(cookie == api.cookie for _, _, cookie in received))
+        connections = [address for _, address, _ in received]
+        self.assertEqual(connections[0], connections[1])
+        self.assertNotEqual(connections[1], connections[2])
+        self.assertEqual(connections[2], connections[3])
 
 
 class OnlineTest(unittest.TestCase):
+    def test_sync_threshold_and_history_limit(self):
+        ui = Mock(spec=OnlineRoom)
+        ui.status = Mock()
+        ui.interval = Mock()
+        ui.interval.get.return_value = "5"
+        ui.auto = Mock()
+        ui.auto.get.return_value = True
+        ui.state = {"config": {"history_s": 5}}
+        ui.last_sync = time.monotonic() - 10
+        for lag in (1135, 1200):
+            OnlineRoom.check_listening_delay(ui, lag)
+            self.assertIn("延迟偏高", ui.status.set.call_args.args[0])
+            ui.manual_sync.assert_not_called()
+        OnlineRoom.check_listening_delay(ui, 1201)
+        ui.manual_sync.assert_called_once()
+        ui.manual_sync.reset_mock()
+        ui.last_sync = time.monotonic()
+        OnlineRoom.check_listening_delay(ui, 1201)
+        ui.auto.get.return_value = False
+        ui.last_sync -= 10
+        OnlineRoom.check_listening_delay(ui, 1201)
+        ui.manual_sync.assert_not_called()
+        ui.state["config"]["history_s"] = 1
+        OnlineRoom.check_listening_delay(ui, 1000)
+        ui.manual_sync.assert_called_once()
+
     def test_desktop_register_login_capture_and_receive(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
             path = Path(tmp)

@@ -1,6 +1,7 @@
 "use strict";
 LivekitClient.setLogLevel("error");
 const prefsKey = "audimate.listen.v1";
+const autoSyncDelayMs = 1200;
 let prefs = {auto: true, interval: 5, receive: "opus"};
 try { Object.assign(prefs, JSON.parse(localStorage.getItem(prefsKey) || "{}")); } catch {}
 function savePrefs() {
@@ -67,7 +68,8 @@ class Listening {
   constructor(ctx, host, transport) {
     this.ctx = ctx; this.host = host; this.transport = transport;
     this.gain = ctx.createGain(); this.gain.connect(ctx.destination);
-    this.lastCheck = this.reported = 0; this.underruns = 0;
+    this.lastCheck = performance.now();
+    this.reported = 0; this.underruns = 0;
     this.queued = new Set();
   }
   close() {
@@ -90,7 +92,7 @@ class Listening {
       diagnostics(this.host, "play", this.transport, metrics);
       this.reported = now;
     }
-    if (lag >= room.config.history_s * 1000 || prefs.auto && lag > 1000 && now-this.lastCheck >= prefs.interval*1000) {
+    if (lag >= room.config.history_s * 1000 || prefs.auto && lag > autoSyncDelayMs && now-this.lastCheck >= prefs.interval*1000) {
       this.lastCheck = now;
       return true;
     }

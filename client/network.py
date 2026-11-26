@@ -1,4 +1,5 @@
 """Authenticated room transport shared by desktop controls and audio threads."""
+from contextlib import closing
 import http.client
 import time
 import json
@@ -87,7 +88,17 @@ class API:
             except (ValueError, OSError, http.client.HTTPException):
                 pass
 
+    def connection(self):
+        args = (self.url.hostname, self.url.port)
+        if self.url.scheme == "https":
+            return http.client.HTTPSConnection(*args, timeout=6, context=self.tls)
+        return http.client.HTTPConnection(*args, timeout=6)
+
     def request(self, path, data=None, *, metadata=False):
+        with closing(self.connection()) as conn:
+            return self.request_on(conn, path, data, metadata=metadata)
+
+    def request_on(self, conn, path, data=None, *, metadata=False):
         raw = isinstance(data, bytes)
         headers = {"User-Agent": "Audimate-Desktop/1"}
         if self.cookie:
@@ -95,12 +106,8 @@ class API:
         if data is not None:
             headers["Content-Type"] = "application/octet-stream" if raw else "application/json"
         payload = data if raw or data is None else json.dumps(data).encode()
-        args = (self.url.hostname, self.url.port)
-        conn = (http.client.HTTPSConnection(*args, timeout=6, context=self.tls) if self.url.scheme == "https"
-                else http.client.HTTPConnection(*args, timeout=6))
-        try:
-            conn.request("GET" if data is None else "POST", "/api/" + path, payload, headers)
-            resp = conn.getresponse()
+        conn.request("GET" if data is None else "POST", "/api/" + path, payload, headers)
+        with conn.getresponse() as resp:
             blob = resp.read()
             if resp.status >= 400:
                 try:
@@ -117,8 +124,6 @@ class API:
                 result = int(resp.getheader("X-Sequence")), blob
                 return (*result, dict(resp.getheaders())) if metadata else result
             return json.loads(blob)
-        finally:
-            conn.close()
 
 
 class AudioUpload(threading.Thread):
@@ -150,21 +155,41 @@ class AudioUpload(threading.Thread):
     def run(self):
         try:
             self.api.calibrate()
-            reported = 0
-            while not self.cancel.is_set():
-                try:
-                    pcm, captured = self.packets.get(timeout=0.2)
-                except queue.Empty:
-                    continue
-                start = time.monotonic()
-                self.api.request(f"audio?stream={self.stream}&captured={captured+self.api.offset:.2f}", pcm)
-                if time.monotonic()-reported >= 2:
-                    self.api.report(self.stream, "overload" if self.dropped else "publish", "pcm",
-                                    dict(upload_ms=(time.monotonic()-start)*1000, discarded=self.dropped))
-                    self.dropped = 0
-                    reported = time.monotonic()
+            with closing(self.api.connection()) as conn:
+                self.send_packets(conn)
         except (OSError, ValueError, http.client.HTTPException) as exc:
             self.error = str(exc)
+
+    def send_packets(self, conn):
+        reported = 0
+        reconnecting = False
+        while not self.cancel.is_set():
+            try:
+                pcm, captured = self.packets.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if self.cancel.is_set():
+                return
+            start = time.monotonic()
+            try:
+                self.api.request_on(conn, f"audio?stream={self.stream}&captured={captured+self.api.offset:.2f}", pcm)
+            except (RoomError, ssl.SSLCertVerificationError):
+                raise
+            except (OSError, http.client.HTTPException):
+                conn.close()
+                # The server may already have appended this packet. Reconnect on the next one.
+                self.api.report(self.stream, "error", "pcm", {"unconfirmed": 1})
+                if reconnecting:
+                    raise
+                reconnecting = True
+                self.notice = "音频包未收到上传确认，正在重新连接。"
+                continue
+            reconnecting = False
+            if time.monotonic()-reported >= 2:
+                self.api.report(self.stream, "overload" if self.dropped else "publish", "pcm",
+                                dict(upload_ms=(time.monotonic()-start)*1000, discarded=self.dropped))
+                self.dropped = 0
+                reported = time.monotonic()
 
 
 class AudioListener(threading.Thread):

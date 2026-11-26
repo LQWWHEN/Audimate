@@ -15,6 +15,9 @@ from .processes import current_track
 from .sharing import ProcessCapture, ShareSelection
 
 
+AUTO_SYNC_DELAY_MS = 1200
+
+
 class OnlineRoom:
     def __init__(self, window, dll):
         self.dll = dll
@@ -202,6 +205,14 @@ class OnlineRoom:
         self.last_sync = time.monotonic()
         self.render(self.state)
 
+    def check_listening_delay(self, lag):
+        if lag > 1000:
+            self.status.set(f"接收延迟偏高（约 {lag:.0f} ms），可手动同步")
+        if (lag >= self.state["config"]["history_s"] * 1000 or
+                (lag > AUTO_SYNC_DELAY_MS and self.auto.get() and
+                 time.monotonic() - self.last_sync >= int(self.interval.get()))):
+            self.manual_sync()
+
     def toggle_listen(self):
         self.want_listen = not self.want_listen
         self.fallback_stream = ""
@@ -316,6 +327,7 @@ class OnlineRoom:
             self.stop_listen()
         if host and self.want_listen and not state["hosting"] and not self.listener and time.monotonic() >= self.retry_at:
             self.listener = RTCWorker(self.api, host) if rtc else AudioListener(self.api, host)
+            self.last_sync = time.monotonic()
             self.listener.start()
             self.status.set("收听 LiveKit · Opus" if rtc else "收听 Opus 解码缓存" if host["codec"]=="opus" else "收听无损 PCM")
         if state["hosting"] and self.selection and self.stream != host["stream"]:
@@ -391,11 +403,8 @@ class OnlineRoom:
             elif self.upload and self.upload.notice:
                 self.status.set(self.upload.notice)
                 self.upload.notice = ""
-            elif self.listener and self.listener.lag is not None and self.listener.lag > 1000:
-                lag = self.listener.lag
-                self.status.set(f"接收延迟偏高（约 {lag:.0f} ms），可手动同步")
-                if lag >= self.state["config"]["history_s"]*1000 or (self.auto.get() and time.monotonic()-self.last_sync >= int(self.interval.get())):
-                    self.manual_sync()
+            elif self.listener and self.listener.lag is not None:
+                self.check_listening_delay(self.listener.lag)
             if not self.future and time.monotonic() >= self.next_poll:
                 if self.state and self.state["hosting"] and not self.selection:
                     self.release()

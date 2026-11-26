@@ -131,6 +131,28 @@ async function run() {
     await host.waitForSelector("#auth:visible");
     await account(host, url, "webQA_" + suffix, password, false);
     await account(listener, url, "listenerQA_" + suffix, password, true);
+    await listener.waitForFunction(() => room?.config);
+    const syncChecks = await listener.evaluate(() => {
+      const original = {auto: prefs.auto, interval: prefs.interval, history: room.config.history_s};
+      const check = new Listening(new OfflineAudioContext(2, 128, 48000), {}, "pcm");
+      const sample = lag => check.observe({playout_ms: lag});
+      check.reported = performance.now();
+      try {
+        prefs.auto = true; prefs.interval = 5; room.config.history_s = 5;
+        check.lastCheck -= 10000;
+        const results = [sample(1135), $("latency").textContent.includes("延迟偏高"), sample(1200),
+                         sample(1201), sample(1201)];
+        prefs.auto = false; check.lastCheck -= 10000;
+        results.push(sample(1201));
+        room.config.history_s = 1;
+        results.push(sample(1000));
+        return results;
+      } finally {
+        prefs.auto = original.auto; prefs.interval = original.interval; room.config.history_s = original.history;
+        check.close();
+      }
+    });
+    assert.deepEqual(syncChecks, [false, true, false, true, false, false, true]);
     const originalPicker = windowPlayers && await host.evaluateHandle(() => navigator.mediaDevices.getDisplayMedia);
     // Simulate chooser outcomes, then use the native picker for the host when requested.
     for (const page of [host, listener])
