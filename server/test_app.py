@@ -11,7 +11,7 @@ from unittest.mock import patch
 from wsgiref.simple_server import make_server, WSGIRequestHandler
 
 from client.network import API
-from .app import App, LEASE
+from .app import App
 from .dev import ThreadedServer
 from .ops_admin import manage
 
@@ -88,7 +88,7 @@ class Integration(unittest.TestCase):
         self.alice.request("stage/request", self.choice)
         with self.app.room.lock:
             key = self.app.room.host["key"]
-            self.app.room.members[key].seen -= LEASE + 1
+            self.app.room.members[key].seen -= self.app.room.lease_s + 1
         self.assertIsNone(self.bob.request("room")["host"])
 
     def test_track_follows_the_current_stream(self):
@@ -178,7 +178,7 @@ class Integration(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "403"):
                 self.bob.request(path, pcm)
             with room.lock:
-                s = room.monitor.snapshot(room, now + 1, 19, LEASE)
+                s = room.monitor.snapshot(room, now + 1, 19)
             self.assertEqual((s["rx"], s["tx"], s["uploads"], s["downloads"]), (1680, 120, 14, 1))
             self.assertEqual((s["empty_reads"], s["cursor_gaps"], s["failures"], s["pulling"]), (1, 0, 1, 1))
             self.assertEqual(s["members"][0]["client"], "Windows 客户端")
@@ -187,8 +187,8 @@ class Integration(unittest.TestCase):
             self.assertNotIn(host["stream"], json.dumps(s))
             self.assertNotIn("audimate=", json.dumps(s))
         with room.lock:
-            room.expire(now + LEASE + 1)
-            later = room.monitor.snapshot(room, now + 610, 19, LEASE)
+            room.expire(now + room.lease_s + 1)
+            later = room.monitor.snapshot(room, now + 610, 19)
         self.assertEqual(later["members"], [])
         self.assertIsNone(later["host"])
         self.assertTrue(all(p["rx_bps"] == p["tx_bps"] == 0 for p in later["history"]))

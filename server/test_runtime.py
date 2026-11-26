@@ -2,7 +2,11 @@
 import http.client
 import json
 import os
+import sqlite3
+import threading
+import time
 import unittest
+from contextlib import closing
 from unittest.mock import patch
 
 from .app import App
@@ -82,6 +86,85 @@ class Runtime(unittest.TestCase):
             self.assertFalse(self.app.room.monitor.samples)
             self.alice.request("stage/leave",dict(stream=host["stream"]))
             self.assertFalse(media.current_grant(token,self.app.room))
+
+    def test_member_timeout_configuration(self):
+        password = manage(self.db, "create", "operator")
+        self.ops("login", dict(name="operator", password=password))
+        config = dict(history_s=5, intervals=[5, 15])
+        self.assertEqual(self.ops("overview")[1]["lease_s"], 20)
+        self.assertEqual(self.ops("service/configure", dict(config, lease_s=8))[0], 409)
+        self.ops("service/maintenance", {})
+        for seconds in (5, 300, 8):
+            status, snapshot = self.ops("service/configure", dict(config, lease_s=seconds))
+            self.assertEqual(status, 200)
+            self.assertEqual(snapshot["service"]["pending"]["lease_s"], seconds)
+            self.assertEqual(snapshot["lease_s"], 20)
+        for invalid in (4, 301, True, "8", 8.5, None):
+            with self.subTest(invalid=invalid):
+                self.assertEqual(self.ops("service/configure", dict(config, lease_s=invalid))[0], 400)
+        # An older dashboard can save the other settings without reverting this one.
+        saved = self.ops("service/configure", config)[1]["service"]
+        self.assertEqual(saved["pending"]["lease_s"], 8)
+        self.assertIn("离线超时 8s", saved["audit"][0]["action"])
+        self.assertEqual(self.ops("service/open", {})[0], 409)
+        self.assertEqual(self.ops("service/restart", {})[1]["lease_s"], 8)
+        self.assertEqual(self.ops("service/open", {})[0], 200)
+        self.assertEqual(App(self.db).room.lease_s, 8)
+
+        for api, name in ((self.alice, "host"), (self.bob, "listener")):
+            api.request("register", dict(name=name, password="local-test-password"))
+        self.alice.request("stage/request", self.choice)
+        self.bob.request("stage/request", self.choice)
+        room = self.app.room
+        with room.lock:
+            host = room.host["key"]
+            applicant = next(iter(room.pending))
+            now = time.monotonic()
+            room.members[host].seen = now - 8
+            room.members[applicant].seen = now - 8.01
+            room.expire(now)
+            self.assertEqual(set(room.members), {host})
+            self.assertFalse(room.pending)
+            self.assertEqual(room.host["key"], host)
+            room.members[host].seen = now - 7
+        self.assertTrue(self.alice.request("room")["hosting"])
+        with room.lock:
+            now = time.monotonic()
+            room.expire(now + 7)
+            self.assertEqual(room.host["key"], host)
+            room.members[host].seen = now - 9
+        self.assertIsNone(self.bob.request("room")["host"])
+        self.assertEqual(self.ops("overview")[1]["members"][0]["name"], "listener")
+        self.assertFalse(self.alice.request("room")["hosting"])
+
+    def test_legacy_timeout_default(self):
+        active = dict(history_s=7, intervals=[5, 15], logging="errors")
+        pending = dict(active, history_s=3)
+        with closing(sqlite3.connect(self.db)) as conn, conn:
+            conn.execute("UPDATE service SET active=?, pending=?", (json.dumps(active), json.dumps(pending)))
+        restored = App(self.db)
+        self.assertEqual(restored.control.active, dict(active, lease_s=20))
+        self.assertEqual(restored.control.pending, dict(pending, lease_s=20))
+        self.assertEqual((restored.room.lease_s, restored.room.history.seconds), (20, 7))
+
+    def test_waiting_member_expires_without_room_requests(self):
+        self.alice.request("register", dict(name="listener", password="local-test-password"))
+        self.alice.request("room")
+        room = self.app.room
+        expired = threading.Event()
+        leave = room.leave
+
+        def observe_leave(key, reason):
+            leave(key, reason)
+            if reason == "连接超时":
+                expired.set()
+
+        with patch.object(room, "leave", observe_leave):
+            with room.lock:
+                self.assertIsNone(room.host)
+                next(iter(room.members.values())).seen -= room.lease_s + 1
+            self.assertTrue(expired.wait(5), "空席房间应主动释放超时成员")
+        self.assertEqual(self.alice.request("me")["name"], "listener")
 
 
 class Timeline(unittest.TestCase):

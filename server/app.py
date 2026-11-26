@@ -16,16 +16,15 @@ from urllib.parse import parse_qs, urlsplit
 
 if __package__:
     from .monitor import Member, Monitor, client_type
-    from .control import Control, Problem
+    from .control import DEFAULT, Control, Problem
     from .media import Media, History
 else:  # Gunicorn imports app:create_app() from the deployment directory.
     from monitor import Member, Monitor, client_type
-    from control import Control, Problem
+    from control import DEFAULT, Control, Problem
     from media import Media, History
 
 WEB = Path(__file__).with_name("web")
 TTL = 7 * 86400
-LEASE = 20
 CAPACITY = 19
 OPS_TTL = 8 * 3600
 
@@ -78,12 +77,17 @@ class Room:
         self.pending = {}
         self.host = None
         self.media = Media()
-        self.history = History(5)
+        self.history = History(DEFAULT["history_s"])
+        self.lease_s = DEFAULT["lease_s"]
         self.monitor = Monitor(development)
         self.flush_service = None
         self.log_epoch = 0
         self.stage_since = self.last_audio = None
         self.watching = False
+
+    def apply_limits(self, config):
+        self.history.seconds = config["history_s"]
+        self.lease_s = config["lease_s"]
 
     def watch(self):
         while True:
@@ -95,7 +99,7 @@ class Room:
                 epoch = self.log_epoch
                 if self.host:
                     self.history.prune(time.monotonic(), 48000 if self.host["codec"]=="opus" else self.host["rate"])
-                elif not pending:
+                elif not self.members and not pending:
                     self.watching = False
                     return
             if pending and self.flush_service:
@@ -134,7 +138,7 @@ class Room:
 
     def expire(self, now):
         for key, member in list(self.members.items()):
-            if now - member.seen > LEASE:
+            if now - member.seen > self.lease_s:
                 self.leave(key, "连接超时")
 
     def touch(self, key, name, agent):
@@ -145,6 +149,7 @@ class Room:
                 raise Problem(409, "房间已满")
             self.members[key] = Member(name, client_type(agent), now, now)
             self.monitor.event("连接", f"{name} 进入房间")
+            self.start_watcher()
         self.members[key].seen = now
 
     def grant(self, key, choice):
@@ -247,7 +252,7 @@ class App:
                     (uid INTEGER PRIMARY KEY REFERENCES users(id));
             """)
             self.control = Control(conn)
-            self.room.history.seconds = self.control.active["history_s"]
+            self.room.apply_limits(self.control.active)
             self.room.monitor.set_level(self.control.active["logging"])
             if development:
                 conn.execute("CREATE TABLE IF NOT EXISTS dev_transport_log (id INTEGER PRIMARY KEY, stamp INTEGER NOT NULL, sample TEXT NOT NULL)")
@@ -395,7 +400,7 @@ class App:
                     if self.room.host:
                         history_rate = 48000 if self.room.host["codec"] == "opus" else self.room.host["rate"]
                         self.room.history.prune(now, history_rate)
-                    snapshot = self.room.monitor.snapshot(self.room, now, CAPACITY, LEASE)
+                    snapshot = self.room.monitor.snapshot(self.room, now, CAPACITY)
                     if self.development:
                         stream = self.room.host["stream"][:8] if self.room.host else next((r["session"] for r in snapshot["samples"]), "")
                         snapshot["timing"] = self.room.monitor.stage_summary(stream)

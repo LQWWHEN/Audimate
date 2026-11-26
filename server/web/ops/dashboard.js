@@ -254,10 +254,11 @@ function renderControl(s) {
   byId("sfuTraffic").textContent=meter ? "LiveKit RTP　入站 "+displayBytes(meter.incoming)+" / 出站 "+displayBytes(meter.outgoing)
       + (meter.rx_bps==null?"":"　当前 "+rate(meter.rx_bps)+" / "+rate(meter.tx_bps)) : "LiveKit RTP　等待 SFU 指标";
   byId("serviceState").textContent = restarting ? "正在重启媒体服务" : maintenance ? "维护中" : "已开放";
-  byId("activeConfig").textContent = "生效缓存 " + active.history_s + " 秒 · 校准档位 " + active.intervals.join(" / ") + " 秒";
+  byId("activeConfig").textContent = "生效缓存 " + active.history_s + " 秒 · 校准档位 " + active.intervals.join(" / ") + " 秒 · 成员离线超时 " + active.lease_s + " 秒";
   const signature=JSON.stringify([pending,active.logging]);
   if (signature!==previousConfig) {
     byId("history").value=pending.history_s; byId("intervals").value=pending.intervals.join(", ");
+    byId("lease").value=pending.lease_s;
     byId("level").value=active.logging; previousConfig=signature;
   }
   for(const el of byId("config").elements) el.disabled=!maintenance;
@@ -286,7 +287,14 @@ async function manage(action,data={}) {
   try {render(await api("service/"+action,data)); byId("opResult").textContent="操作已完成";}
   catch(e){byId("opResult").textContent=e.message;}
 }
-byId("config").onsubmit=e=>{e.preventDefault();manage("configure",{history_s:Number(byId("history").value),intervals:byId("intervals").value.split(/[,，]/).map(Number)});};
+byId("config").onsubmit = e => {
+  e.preventDefault();
+  manage("configure", {
+    history_s: Number(byId("history").value),
+    intervals: byId("intervals").value.split(/[,，]/).map(Number),
+    lease_s: Number(byId("lease").value),
+  });
+};
 byId("saveLevel").onclick=()=>manage("logging",{logging:byId("level").value});
 byId("maintenance").onclick=()=>{if(confirm("进入维护将结束所有普通用户会话。继续？"))manage("maintenance");};
 byId("restart").onclick=()=>{if(confirm("现在重启并应用暂存配置？"))manage("restart");};

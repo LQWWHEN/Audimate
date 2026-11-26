@@ -11,7 +11,7 @@ class Problem(Exception):
         self.code, self.message = code, message
 
 
-DEFAULT = {"history_s": 5, "intervals": [5, 10, 30], "logging": "debug"}
+DEFAULT = {"history_s": 5, "intervals": [5, 10, 30], "logging": "debug", "lease_s": 20}
 
 
 class Control:
@@ -28,9 +28,11 @@ class Control:
         conn.execute("INSERT OR IGNORE INTO service VALUES(1,0,?,?)", (defaults, defaults))
         maintenance, active, pending = conn.execute("SELECT maintenance,active,pending FROM service").fetchone()
         self.maintenance = bool(maintenance)
-        self.pending = json.loads(pending)
-        self.active = json.loads(pending if maintenance else active)
-        conn.execute("UPDATE service SET active=? WHERE id=1", (json.dumps(self.active),))
+        active_config = DEFAULT | json.loads(active)
+        self.pending = active_config | json.loads(pending)
+        self.active = self.pending.copy() if maintenance else active_config
+        conn.execute("UPDATE service SET active=?, pending=? WHERE id=1",
+                     (json.dumps(self.active), json.dumps(self.pending)))
         conn.commit()
 
     def snapshot(self, conn):
@@ -66,14 +68,17 @@ class Control:
             if (not isinstance(intervals, list) or not 1 <= len(intervals) <= 12 or 5 not in intervals or
                     any(type(i) is not int or not 1 <= i <= 300 for i in intervals)):
                 raise Problem(400, "同步档位应为 1–300 秒的整数，须包含默认 5 秒")
-            self.pending = dict(self.active, history_s=history, intervals=sorted(set(intervals)))
+            lease = data.get("lease_s", self.pending["lease_s"])
+            if type(lease) is not int or not 5 <= lease <= 300:
+                raise Problem(400, "成员离线超时应为 5–300 的整数秒")
+            self.pending = dict(self.pending, history_s=history, intervals=sorted(set(intervals)), lease_s=lease)
         elif action == "restart":
             trigger = os.environ.get("AUDIMATE_RESTART_FILE")
             if trigger:
                 Path(trigger).touch()
             room.reset()
             self.active = self.pending.copy()
-            room.history.seconds = self.active["history_s"]
+            room.apply_limits(self.active)
         elif action == "open":
             if self.active != self.pending:
                 raise Problem(409, "请先重启服务，使暂存配置生效")
@@ -87,7 +92,7 @@ class Control:
                      (self.maintenance, json.dumps(self.active), json.dumps(self.pending)))
         detail = action
         if action == "configure":
-            detail += f" · {self.pending['history_s']}s · {self.pending['intervals']}"
+            detail += f" · 缓存 {self.pending['history_s']}s · 校准 {self.pending['intervals']} · 离线超时 {self.pending['lease_s']}s"
         elif action == "logging":
             detail += " · " + self.active["logging"]
         self.audit(conn, actor, detail)

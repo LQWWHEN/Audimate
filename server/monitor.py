@@ -204,7 +204,7 @@ class Monitor:
         member.uploaded += received
         member.downloaded += sent
 
-    def snapshot(self, room, now, capacity, lease):
+    def snapshot(self, room, now, capacity):
         # Each point spans five completed seconds. Assign wall-clock labels
         # at read time so NTP adjustments cannot shift the underlying counters.
         end = int(now)
@@ -240,7 +240,7 @@ class Monitor:
             stream = {k: host[k] for k in ("name", "source", "rate", "bits")}
             stream.update(codec=host["codec"], age_s=int(now - room.stage_since), sequence=room.history.sequence,
                           last_audio_s=None if room.last_audio is None else round(now - room.last_audio, 1))
-        return dict(time=int(wall), uptime_s=int(now - self.started), capacity=capacity, lease_s=lease,
+        return dict(time=int(wall), uptime_s=int(now - self.started), capacity=capacity, lease_s=room.lease_s,
                     members=members, pulling=pulling, pending=len(room.pending), host=stream,
                     buffer_blocks=len(room.history.blocks), history_s=room.history.seconds, samples=list(self.samples),
                     rx=self.uploaded, tx=self.downloaded, uploads=self.uploads, downloads=self.downloads,

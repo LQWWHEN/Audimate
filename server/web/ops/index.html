@@ -57,6 +57,7 @@
         <div class="controls"><label>开发日志<select id="level"><option value="debug">完整调试</option><option value="errors">仅异常</option><option value="off">关闭诊断</option></select></label>
         <button id="saveLevel">应用日志级别</button></div>
         <p id="activeConfig"></p><form id="config" class="controls"><label>历史上限（秒）<input id="history" type="number" min="1" max="30" required></label>
+        <label>成员离线超时（秒）<input id="lease" type="number" min="5" max="300" step="1" required></label>
         <label>校准档位（秒，逗号分隔）<input id="intervals" required></label><button>暂存配置</button></form>
         <div class="controls"><button id="maintenance">停机维护</button><button id="restart">重启房间服务</button><button id="open">开放房间</button></div>
         <output id="opResult" role="status"></output></section>
