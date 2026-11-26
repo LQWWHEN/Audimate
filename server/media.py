@@ -189,9 +189,10 @@ class Media:
             if record and participant.identity == self.identity(stream, host["key"]):
                 tasks.append(asyncio.create_task(consume(track)))
 
+        # The SDK negotiates stereo on its default transport. Forcing split peer
+        # connections here downmixes the native subscriber on the pinned release.
         join = asyncio.create_task(session.connect(self.internal.replace("http", "ws", 1), token,
-                                   options=rtc.RoomOptions(auto_subscribe=record, single_peer_connection=False,
-                                                          connect_timeout=10)))
+                                   options=rtc.RoomOptions(auto_subscribe=record, connect_timeout=10)))
         try:
             await asyncio.shield(join)
             if record:
