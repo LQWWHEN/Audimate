@@ -3,6 +3,7 @@ import argparse
 from importlib.metadata import distribution
 from pathlib import Path
 import platform
+import ssl
 import struct
 import subprocess
 import sys
@@ -51,6 +52,11 @@ def main():
             (vendor/"flac-LICENSE.txt", "licenses/flac"),
             (vendor/"flac-wasi-NOTICES.txt", "licenses/flac"),
             (Path(sys.base_prefix)/"LICENSE.txt", "licenses/python")]
+    # Some Python distributions ship a public CA distrust list next to ssl.py.
+    # The frozen stdlib resolves this path relative to the extraction root.
+    distrust_list = Path(ssl.__file__).with_name("codex-rejected-cas.pem")
+    if distrust_list.is_file():
+        data.append((distrust_list, "."))
     if args.server:
         address = urlsplit(args.server)
         if (address.scheme != "https" or not address.hostname or address.username is not None
