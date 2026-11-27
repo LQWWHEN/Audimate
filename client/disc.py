@@ -12,8 +12,8 @@ from .spectrum import BANDS
 
 ICE = QColor("#9edcf4")
 # Ribbon amplitude, whole-ring displacement, cover displacement, band release seconds.
-MOTION = {"heavy": (.38, .155, .048, .055), "pop": (.33, .115, .030, .075),
-          "light": (.16, .045, .008, .135)}
+MOTION = {"heavy": (.40, .155, .048, .055), "pop": (.35, .115, .030, .075),
+          "light": (.17, .045, .008, .135)}
 
 
 def tint(color, alpha):

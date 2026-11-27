@@ -2,7 +2,7 @@ import unittest
 
 import numpy as np
 
-from .spectrum import BANDS, Spectrum
+from .spectrum import BANDS, Spectrum, band_edges
 
 
 RATE = 48000
@@ -13,6 +13,31 @@ def pcm(mono):
 
 
 class SpectrumTests(unittest.TestCase):
+    def test_bass_mapping_and_sub_bass_signal(self):
+        for rate in (8000, 44100, 48000, 96000, 192000):
+            with self.subTest(rate=rate):
+                edges = band_edges(rate)
+                self.assertEqual(len(edges), BANDS+1)
+                self.assertTrue(np.all(np.diff(edges) > 0))
+                self.assertAlmostEqual(edges[0], 20)
+                self.assertAlmostEqual(edges[-1], min(17000, rate/2))
+                centers = np.sqrt(edges[1:] * edges[:-1])
+                degrees = np.linspace(0, 180, BANDS)
+                start, end, octave = np.interp(np.log([80, 420, 840]), np.log(centers), degrees)
+                self.assertAlmostEqual((end-start) / np.log2(420/80), 1.25 * (octave-end), delta=1)
+                if rate == RATE:
+                    self.assertAlmostEqual(start, 34, delta=1)
+                    self.assertAlmostEqual(end, 87, delta=1)
+
+                analyzer = Spectrum(rate, 16)
+                t = np.arange(rate//2)/rate
+                analyzer.analyze(pcm(.35*np.sin(2*np.pi*20*t)))
+                levels = analyzer.snapshot[1]
+                self.assertGreater(levels[:3].max(), .6)
+                self.assertGreater(levels[:3].max(), levels[centers > 80].max() + .4)
+                analyzer.analyze(pcm(np.full(len(t), .12)))
+                np.testing.assert_array_equal(analyzer.snapshot[1], 0)
+
     def test_quieter_band_between_bass_peaks_stays_visible_as_a_valley(self):
         t = np.arange(round(.8 * RATE)) / RATE
         signal = sum(level * np.sin(2*np.pi*hz*t) for hz, level in
@@ -20,7 +45,7 @@ class SpectrumTests(unittest.TestCase):
         analyzer = Spectrum(RATE, 16)
         analyzer.analyze(pcm(signal))
         levels = analyzer.snapshot[1]
-        edges = np.geomspace(32, 17000, BANDS+1)
+        edges = band_edges(RATE)
         centers = np.sqrt(edges[:-1] * edges[1:])
         peak, valley, shoulder = [levels[np.argmin(abs(centers - hz))] for hz in (187, 243, 277)]
         self.assertGreater(peak - valley, .45)

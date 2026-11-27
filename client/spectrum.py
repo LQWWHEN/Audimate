@@ -10,6 +10,13 @@ BANDS = 48
 STYLES = ("pop", "heavy", "light")
 
 
+def band_edges(rate):
+    """Give 80–420 Hz a quarter more arc per octave on the mirrored spectrum."""
+    log_hz = np.log([20, 80, 420, min(17000, rate / 2)])
+    arc = np.r_[0, np.cumsum(np.diff(log_hz) * [1, 1.25, 1])]
+    return np.exp(np.interp(np.linspace(0, arc[-1], BANDS + 1), arc, log_hz))
+
+
 class Spectrum(threading.Thread):
     def __init__(self, rate, bits):
         super().__init__(name="Audimate spectrum", daemon=True)
@@ -27,7 +34,7 @@ class Spectrum(threading.Thread):
         self.hop_bytes = self.hop * 2 * (bits // 8)
         self.remainder = b""
         freqs = np.fft.rfftfreq(size, 1 / rate)
-        edges = np.geomspace(32, min(17000, rate / 2), BANDS + 1)
+        edges = band_edges(rate)
         self.ranges = [(max(1, a), max(2, a + 1, b)) for a, b in
                        zip(np.searchsorted(freqs, edges[:-1]), np.searchsorted(freqs, edges[1:]))]
         low, body, end = freqs.searchsorted([40, 145, 420])
@@ -45,7 +52,7 @@ class Spectrum(threading.Thread):
         bin_position = centers[self.narrow] * size / rate
         self.left_bin = bin_position.astype(int)
         self.bin_fraction = bin_position - self.left_bin
-        self.body_weight = np.interp(centers, [32, 45, 320, 600], [.75, 1, 1, 0])
+        self.body_weight = np.interp(centers, [20, 45, 320, 600], [.75, 1, 1, 0])
         self.band_background = np.zeros(BANDS)
 
     def feed(self, pcm):
@@ -86,7 +93,10 @@ class Spectrum(threading.Thread):
     def analyze_frame(self, frame):
         self.samples[:-self.hop] = self.samples[self.hop:]
         self.samples[-self.hop:] = frame
-        fft = np.fft.rfft(self.samples * self.window[:, None], axis=0)
+        # The 20 Hz bands can interpolate the first FFT bin. Remove channel
+        # offsets before windowing so a DC bias cannot become a sub-bass peak.
+        centered = self.samples - self.samples.mean(axis=0)
+        fft = np.fft.rfft(centered * self.window[:, None], axis=0)
         power = (abs(fft) ** 2).mean(axis=1) * self.fft_scale
         # Weight positive changes per bin against the local musical background.
         # A sustained bass note has little flux; a new drum can still cut through it.
@@ -114,7 +124,7 @@ class Spectrum(threading.Thread):
         # Preserve the loudest band while lowering the shoulders of each peak.
         # The reference floor keeps quiet passages quiet; silence stays at zero.
         peak = max(.55, bands.max())
-        bands = peak * (bands / peak) ** 1.65
+        bands = peak * (bands / peak) ** 1.80
         neighbors = np.convolve(np.pad(bands, 3, mode="edge"),
                                 [.08, .13, .18, .22, .18, .13, .08], mode="valid")
         bands = np.clip(bands + .60 * (bands - neighbors), 0, peak)
