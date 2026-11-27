@@ -24,8 +24,9 @@ ApplicationWindow {
     Material.theme: Material.Dark
     Material.accent: "#bccff3"
     property var v: room.view
-    property color secondary: "#b6b9ce"
-    property color muted: "#a0a6c0"
+    readonly property bool hasBackdrop: coverField.status === Image.Ready && coverField.source.toString() !== ""
+    property color secondary: hasBackdrop ? "#e0e2ee" : "#b6b9ce"
+    property color muted: hasBackdrop ? "#d4d7e5" : "#a0a6c0"
     readonly property int railLabelSize: portrait ? 16 : 17
     readonly property int railValueSize: portrait ? 20 : 22
     readonly property int valueGap: portrait ? 5 : 8
@@ -74,9 +75,17 @@ ApplicationWindow {
             x: (win.dockEdge === "left" ? -1 : win.dockEdge === "right" ? 1 : 0) * (win.width-6) * win.fold
             y: win.dockEdge === "top" ? -(win.height-6)*win.fold : 0
         }
+        Image {
+            id: coverField; objectName: "coverBackdrop"
+            anchors.fill: parent
+            source: v.entered && !v.demo && !win.editingDefaults && room.localDefaults.coverBackground ? room.coverBackdrop : ""
+            fillMode: Image.PreserveAspectCrop
+            smooth: true; cache: false
+        }
         TitleBar { id: titleBar; width: parent.width; shell: win; model: room }
-        Item {
+        Rectangle {
             id: field
+            color: win.hasBackdrop ? Qt.rgba(.08, .09, .15, .70) : "transparent"
             visible: !win.editingDefaults
             anchors { top: titleBar.bottom; bottom: footerBar.top; left: parent.left; right: parent.right }
             readonly property real infoTop: height - win.infoHeight - 12
@@ -117,7 +126,7 @@ ApplicationWindow {
                 visible: v.entered
                 width: win.portrait ? field.width-40 : field.width-2*field.leftRailEnd-24
                 anchors.horizontalCenter: parent.horizontalCenter
-                y: disc.y+disc.height-8
+                y: disc.y + disc.height - 8 - Math.min(win.portrait ? 9 : 18, disc.height * .04)
                 spacing: 2
                 SongLine {
                     id: trackTitle; objectName: "songTitle"
@@ -251,7 +260,7 @@ ApplicationWindow {
             id: footerBar; anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
             height: implicitHeight
             visible: v.entered && !win.editingDefaults; implicitHeight: visible ? bar.implicitHeight+18 : 0
-            color: "#1d2032"
+            color: win.hasBackdrop ? Qt.rgba(.11, .13, .20, .80) : "#1d2032"
             Rectangle { width: parent.width; height: 1; color: "#35394e" }
             ColumnLayout {
                 id: bar; anchors.left: parent.left; anchors.right: parent.right; anchors.verticalCenter: parent.verticalCenter

@@ -7,17 +7,21 @@ FocusScope {
     required property var roomModel
     required property bool portrait
     property int section: 0
+    property bool spectrumEdited: false
     property string error: ""
     property var intervalChoices: [5,10,30]
     readonly property alias preview: previewBox
-    readonly property bool showDisc: visible && section === 0 && roomModel.view.entered
+    readonly property bool showDisc: visible && roomModel.view.entered
     signal finished()
 
     function load() {
         const prefs = roomModel.localDefaults
         error = ""
         section = 0
+        settingsScroll.contentItem.contentY = 0
+        spectrumEdited = false
         delay.value = prefs.delay
+        coverBackground.checked = prefs.coverBackground
         motion.currentIndex = ["system","full","reduced"].indexOf(prefs.motion)
         editor.draft = roomModel.view.profile
         host.load(prefs)
@@ -33,15 +37,20 @@ FocusScope {
     }
     function save() {
         const values = Object.assign({}, host.values, {
-            delay: Math.round(delay.value), motion: ["system","full","reduced"][motion.currentIndex],
+            delay: Math.round(delay.value), coverBackground: coverBackground.checked,
+            motion: ["system","full","reduced"][motion.currentIndex],
             receive: receive.currentIndex === 0 ? "Opus" : "无损 PCM",
             auto: autoSync.checked, interval: intervalChoices[interval.currentIndex]
         })
-        if (!roomModel.view.entered) values.spectrum = editor.draft
-        error = roomModel.saveDefaults(values)
-        if (!error) error = roomModel.applySpectrum(editor.draft, false)
+        const prefs = roomModel.localDefaults
+        const prefsEdited = Object.keys(values).some(key => values[key] !== prefs[key])
+        if (spectrumEdited && !roomModel.view.entered) values.spectrum = editor.draft
+        error = prefsEdited || values.spectrum ? roomModel.saveDefaults(values) : ""
+        if (error) { section = 0; return }
+        if (spectrumEdited) error = roomModel.applySpectrum(editor.draft, false)
         if (!error) cancel()
     }
+    onSectionChanged: settingsScroll.contentItem.contentY = 0
     Shortcut { sequence: "Escape"; enabled: page.visible; onActivated: page.cancel() }
     ColumnLayout {
         anchors { top: parent.top; bottom: parent.bottom; horizontalCenter: parent.horizontalCenter }
@@ -56,7 +65,7 @@ FocusScope {
         RowLayout {
             Layout.fillWidth: true; spacing: page.portrait ? 4 : 12
             Repeater {
-                model: ["频谱配置", "主持默认值", "收听偏好"]
+                model: ["个人偏好", "频谱配置"]
                 AbstractButton {
                     id: tab; required property string modelData; required property int index
                     objectName: "section"+index; text: modelData
@@ -76,33 +85,38 @@ FocusScope {
         }
         Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: "#353b50" }
         ScrollView {
+            id: settingsScroll
             Layout.fillWidth: true; Layout.fillHeight: true; clip: true
             contentWidth: availableWidth
             ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
             ColumnLayout {
-                width: parent.width; spacing: 10
+                width: settingsScroll.availableWidth; spacing: 10
                 ColumnLayout {
-                    visible: page.section === 0; Layout.fillWidth: true; spacing: 8
+                    visible: page.section === 1; Layout.fillWidth: true; spacing: 8
                     SpectrumEditor {
                         id: editor; objectName: "spectrumEditor"; Layout.fillWidth: true
                         roomModel: page.roomModel
-                        onEdited: page.error = roomModel.previewSpectrum(draft)
+                        onEdited: {
+                            page.spectrumEdited = true
+                            page.error = roomModel.previewSpectrum(draft)
+                        }
                     }
                     Word { visible: page.roomModel.view.mine && !page.roomModel.view.fullSpectrum
                         text: "当前服务器仅共享基础预设"; font.pixelSize: 14 }
-                    Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: "#353b50" }
+                }
+                ColumnLayout {
+                    visible: page.section === 0; Layout.fillWidth: true; spacing: 8
+                    Word { text: "播放与外观"; Layout.topMargin: 4; font.pixelSize: 20; font.weight: Font.DemiBold }
+                    Switch { id: coverBackground; objectName: "coverBackgroundSwitch"; text: "使用虚化专辑封面背景" }
                     RowLayout {
-                        Layout.fillWidth: true; Layout.topMargin: 10
-                        ColumnLayout {
-                            Layout.fillWidth: true; spacing: 0
-                            Word { text: "本机播放延迟"; color: "#bdc5db" }
-                            RowLayout {
-                                spacing: 7
-                                Word { text: Math.round(delay.value); font.pixelSize: 46; font.weight: Font.DemiBold }
-                                Word { text: "ms"; color: "#b4cfe5"; font.pixelSize: 20; Layout.alignment: Qt.AlignBaseline }
-                            }
-                        }
-
+                        Layout.fillWidth: true
+                        Word { text: "动画幅度"; Layout.fillWidth: true }
+                        ComboBox { id: motion; model: ["跟随系统","完整动态","减弱动态"]; Accessible.name: "动画幅度" }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true; Layout.topMargin: 4
+                        Word { text: "本机播放延迟"; Layout.fillWidth: true }
+                        Word { text: Math.round(delay.value) + " ms"; font.pixelSize: 22; font.weight: Font.DemiBold }
                     }
                     Slider { id: delay; objectName: "playbackDelay"; Layout.fillWidth: true
                         from: 0; to: 200; stepSize: 5; snapMode: Slider.SnapAlways; Accessible.name: "本机播放延迟（毫秒）"
@@ -115,31 +129,23 @@ FocusScope {
                     }
                     Word { Layout.fillWidth: true; wrapMode: Text.Wrap; color: "#bcc2d6"
                         text: "鼓点先响、圆环后动时，向右调整。校准作用于本机收听和试听。主持时，声音由所选播放器直接输出。" }
-                    RowLayout {
-                        Layout.fillWidth: true; Layout.topMargin: 10
-                        Word { text: "动画幅度"; Layout.fillWidth: true }
-                        ComboBox { id: motion; model: ["跟随系统","完整动态","减弱动态"]; Accessible.name: "动画幅度" }
-                    }
-                }
-                ColumnLayout {
-                    visible: page.section === 1; Layout.fillWidth: true; spacing: 8
-                    Word { Layout.fillWidth: true; Layout.topMargin: 6; wrapMode: Text.Wrap; color: "#bcc2d6"; text: "下次主持时使用，也可在选源时临时调整。" }
-                    HostFields { id: host; Layout.fillWidth: true }
-                }
-                ColumnLayout {
-                    visible: page.section === 2; Layout.fillWidth: true; spacing: 10
-                    Word { Layout.topMargin: 8; text: "优先接收" }
+                    Rectangle { Layout.fillWidth: true; Layout.topMargin: 8; implicitHeight: 1; color: "#353b50" }
+                    Word { text: "收听默认值"; font.pixelSize: 20; font.weight: Font.DemiBold }
+                    Word { text: "优先接收" }
                     ComboBox { id: receive; Layout.fillWidth: true; model: ["Opus · 节省流量","优先无损"]; Accessible.name: "优先接收" }
                     CheckBox { id: autoSync; text: "延迟持续过高时自动同步" }
                     RowLayout { Layout.fillWidth: true; enabled: autoSync.checked
                         Word { text: "同步间隔（秒）"; Layout.fillWidth: true }
                         ComboBox { id: interval; model: page.intervalChoices; Accessible.name: "同步间隔（秒）" }
                     }
+                    Rectangle { Layout.fillWidth: true; Layout.topMargin: 8; implicitHeight: 1; color: "#353b50" }
+                    Word { text: "主持默认值"; font.pixelSize: 20; font.weight: Font.DemiBold }
+                    HostFields { id: host; Layout.fillWidth: true }
                 }
             }
         }
         RowLayout {
-            Layout.fillWidth: true; visible: page.section === 0 && page.roomModel.view.entered
+            Layout.fillWidth: true; visible: page.section === 1 && page.roomModel.view.entered
             Item { Layout.fillWidth: true }
             RoomButton { objectName: "storeSpectrumDefault"; text: "存为本机默认"; visible: page.roomModel.view.entered
                 onClicked: {
@@ -159,7 +165,7 @@ FocusScope {
             Layout.fillWidth: true; spacing: 10
             Item { Layout.fillWidth: true }
             RoomButton { text: "取消"; quiet: true; onClicked: page.cancel() }
-            RoomButton { text: page.roomModel.view.entered ? "应用并返回" : "存为本机默认"; objectName: "saveDefaults"; primary: true; onClicked: page.save() }
+            RoomButton { text: page.roomModel.view.entered ? "应用并返回" : "保存并返回"; objectName: "saveDefaults"; primary: true; onClicked: page.save() }
         }
     }
 }

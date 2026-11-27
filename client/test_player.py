@@ -11,6 +11,7 @@ from unittest.mock import patch
 from wsgiref.simple_server import make_server
 
 import numpy as np
+from PIL import Image
 from PySide6.QtCore import QObject, QMetaObject, QCoreApplication, QEvent, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter
@@ -83,6 +84,65 @@ class AnalysisTests(unittest.TestCase):
 
 
 class RoomTests(unittest.TestCase):
+    def test_confirmed_cover_backdrop_and_local_preference(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        QQuickStyle.setStyle("Material")
+        app = QGuiApplication.instance() or QGuiApplication([])
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            model = RoomView(DEFAULT_DLL)
+            model.clock.stop()
+            engine, window = build_window(model)
+            model.user, model.want, model.next_poll = "听众", False, float("inf")
+            host = dict(name="主持", stream="a", rate=48000, bits=16)
+            def apply_info(**info):
+                model.apply(dict(host=dict(host, recognition=info)))
+
+            art = Image.new("RGB", (256, 256), "#dfa15a")
+            art.paste("#547cb7", (0, 0, 128, 256))
+            try:
+                self.assertTrue(model.localDefaults["coverBackground"])
+                with patch("client.room_view.fetch_cover", side_effect=[art, art, None]) as fetch:
+                    apply_info(candidate=dict(cover="candidate"))
+                    model.tick()
+                    self.assertFalse(window.property("hasBackdrop"))
+                    fetch.assert_not_called()
+                    apply_info(current=dict(cover="confirmed"))
+                    model.tick()
+                    model.cover_job.result(timeout=5)
+                    model.tick()
+                    QTest.qWait(50)
+                    self.assertTrue(window.property("hasBackdrop"))
+                    self.assertEqual(model.disc.art.width(), 256)
+                    page = window.findChild(QObject, "localSettings")
+                    switch = window.findChild(QObject, "coverBackgroundSwitch")
+                    self.assertTrue(QMetaObject.invokeMethod(window, "toggleDefaults"))
+                    self.assertTrue(switch.isVisible())
+                    switch.setProperty("checked", False)
+                    self.assertTrue(QMetaObject.invokeMethod(page, "save"))
+                    self.assertFalse(window.property("hasBackdrop"))
+                    self.assertFalse(local_settings.load(model.pref_file)["coverBackground"])
+                    self.assertFalse(model.disc.art.isNull())
+                    self.assertEqual(model.saveDefaults(dict(coverBackground=True)), "")
+                    QTest.qWait(30)
+                    self.assertTrue(window.property("hasBackdrop"))
+                    self.assertEqual(fetch.call_count, 1)
+                    apply_info(current=dict(cover="second"))
+                    self.assertFalse(window.property("hasBackdrop"))
+                    model.tick()
+                    model.cover_job.result(timeout=5)
+                    apply_info(current=dict(cover="unavailable"))
+                    model.tick()
+                    self.assertFalse(window.property("hasBackdrop"))
+                    model.cover_job.result(timeout=5)
+                    model.tick()
+                    self.assertFalse(window.property("hasBackdrop"))
+                    self.assertTrue(model.disc.art.isNull())
+                    self.assertEqual(fetch.call_count, 3)
+            finally:
+                model.close()
+                engine.deleteLater()
+                QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
+
     def test_spectrum_editor_preview_session_and_default(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         QQuickStyle.setStyle("Material")
@@ -103,17 +163,25 @@ class RoomTests(unittest.TestCase):
                 editor = window.findChild(QObject, "spectrumEditor")
                 page = window.findChild(QObject, "localSettings")
                 invoke(window, "toggleDefaults()")
+                switch = window.findChild(QObject, "coverBackgroundSwitch")
+                self.assertTrue(switch.isVisible())
+                self.assertFalse(editor.isVisible())
+                invoke(page, "section = 1")
+                self.assertFalse(switch.isVisible())
+                self.assertTrue(editor.isVisible())
                 invoke(editor, 'update("gate", -40)')
                 self.assertTrue(model.preview_profile["custom"])
                 invoke(page, "cancel()")
                 self.assertIsNone(model.preview_profile)
                 self.assertEqual(model.profile["gate"], -50)
                 invoke(window, "toggleDefaults()")
+                invoke(page, "section = 1")
                 invoke(editor, 'update("count", 64)')
                 invoke(page, "save()")
                 self.assertEqual(model.profile["count"], 64)
                 self.assertEqual(local_settings.load(model.pref_file)["spectrum"]["count"], 96)
                 invoke(window, "toggleDefaults()")
+                invoke(page, "section = 1")
                 invoke(window.findChild(QObject, "storeSpectrumDefault"), "click()")
                 model.reset()
                 self.assertEqual(model.profile, local_settings.load(model.pref_file)["spectrum"])

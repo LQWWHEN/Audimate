@@ -1,11 +1,14 @@
 """Qt's room model. Network futures complete on the GUI clock; audio stays on workers."""
 from concurrent.futures import ThreadPoolExecutor
+from base64 import b64encode
+from io import BytesIO
 import os
 from pathlib import Path
 import sys
 import time
 from urllib.parse import urlencode
 
+from PIL import ImageFilter
 from PySide6.QtCore import QObject, Property, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QImage
 
@@ -29,7 +32,7 @@ def quality(host):
 def load_art(url):
     img = fetch_cover(url, 768)
     if img is None:
-        return QImage(), ICE
+        return QImage(), ICE, ""
     img = img.convert("RGB")
     raw = img.tobytes()
     image = QImage(raw, img.width, img.height, img.width*3, QImage.Format_RGB888).copy()
@@ -40,7 +43,11 @@ def load_art(url):
     color = QColor(*max(swatches, key=score)[1])
     hue = color.hsvHueF()
     accent = QColor.fromHsvF(max(0, hue), min(.58, color.hsvSaturationF()), .94)
-    return image, accent
+    img.thumbnail((160, 160))
+    blurred = img.filter(ImageFilter.GaussianBlur(max(1, min(img.size) * .055)))
+    encoded = BytesIO()
+    blurred.save(encoded, format="JPEG", quality=85)
+    return image, accent, "data:image/jpeg;base64," + b64encode(encoded.getvalue()).decode("ascii")
 
 
 class RoomView(QObject):
@@ -48,6 +55,7 @@ class RoomView(QObject):
     sourcesChanged = Signal()
     submitted = Signal()
     defaultsChanged = Signal()
+    backdropChanged = Signal()
 
     def __init__(self, dll, development=False):
         super().__init__()
@@ -63,6 +71,7 @@ class RoomView(QObject):
         self.control_error = ""
         self.user = self.stream = self.notice = ""
         self.cover_url = self.loaded_url = ""
+        self.backdrop = ""
         self.demo = False
         self.want = True
         self.generation = 0
@@ -95,6 +104,15 @@ class RoomView(QObject):
     @Property("QVariantMap", notify=defaultsChanged)
     def localDefaults(self):
         return self.defaults.copy()
+
+    @Property(str, notify=backdropChanged)
+    def coverBackdrop(self):
+        return self.backdrop
+
+    def set_backdrop(self, source):
+        if self.backdrop != source:
+            self.backdrop = source
+            self.backdropChanged.emit()
 
     def playback_delay(self):
         return self.defaults["delay"] if self.preview_delay is None else self.preview_delay
@@ -285,7 +303,12 @@ class RoomView(QObject):
         if (info.get("current") or h.get("track") or not info.get("candidate")
                 or old.get("stream") != h.get("stream")):
             self.song_info = info.get("current") or {}
-        self.cover_url = self.song_info.get("cover") or ""
+        cover = (info.get("current") or {}).get("cover") or ""
+        if self.cover_url != cover:
+            self.cover_url, self.loaded_url = cover, ""
+            self.set_backdrop("")
+            if self.disc:
+                self.disc.artwork(QImage(), ICE)
         self.reconcile()
         self.refresh()
 
@@ -349,17 +372,16 @@ class RoomView(QObject):
             job,self.cover_job = self.cover_job,None
             if self.requested_url == self.cover_url and not self.demo:
                 try:
-                    img,color = job.result()
+                    img, color, backdrop = job.result()
                 except Exception:
-                    img,color = QImage(),ICE
-                self.disc.artwork(img,color)
-        if not self.demo and self.loaded_url != self.cover_url and (not self.cover_url or not self.cover_job):
-            self.loaded_url = self.cover_url
-            if self.cover_url:
-                self.requested_url = self.cover_url
-                self.cover_job = self.pool.submit(load_art,self.cover_url)
-            else:
-                self.disc.artwork(QImage(),ICE)
+                    img, color, backdrop = QImage(), ICE, ""
+                self.loaded_url = self.requested_url
+                if self.disc:
+                    self.disc.artwork(img, color)
+                self.set_backdrop(backdrop)
+        if not self.demo and self.cover_url and self.loaded_url != self.cover_url and not self.cover_job:
+            self.requested_url = self.cover_url
+            self.cover_job = self.pool.submit(load_art, self.cover_url)
         if not self.user:
             self.refresh()
             return
@@ -584,6 +606,7 @@ class RoomView(QObject):
         self.profile = self.defaults["spectrum"]
         self.preview_profile = self.preview_delay = None
         self.cover_url = self.loaded_url = ""
+        self.set_backdrop("")
         self.song_info = {}
         self.control_error = ""
         self.source = self.api = None
