@@ -11,9 +11,10 @@ ApplicationWindow {
     property bool portrait: false
     property string dockEdge: ""
     property real fold: 0
-    readonly property bool popupOpen: settings.visible || sourceSheet.visible || presets.visible
+    property bool editingDefaults: false
+    readonly property bool popupOpen: editingDefaults || roundSettings.visible || sourceSheet.visible || presets.visible
     minimumWidth: portrait ? 420 : 960
-    minimumHeight: Math.ceil(Math.max(portrait ? 600 : 560, titleBar.height + footerBar.height
+    minimumHeight: editingDefaults ? (portrait ? 600 : 560) : Math.ceil(Math.max(portrait ? 600 : 560, titleBar.height + footerBar.height
         + (v.entered ? (portrait ? infoHeight + song.height + 128 : Math.max(infoHeight + 44, song.height + 180))
                      : login.height + (portrait ? 135 : 32))))
     readonly property real infoHeight: Math.max(sessionInfo.implicitHeight, signalInfo.implicitHeight)
@@ -28,13 +29,18 @@ ApplicationWindow {
     property var styles: ["pop","heavy","light"]
     property var styleNames: ["流行摇滚","重型音乐","轻音乐"]
     property string styleName: styleNames[Math.max(0,styles.indexOf(v.style))]
-    property bool reduced: (Qt.styleHints.accessibility?.motionPreference ?? 0) === 1
+    readonly property bool reduced: room.localDefaults.motion === "reduced" ||
+        (room.localDefaults.motion === "system" && (Qt.styleHints.accessibility?.motionPreference ?? 0) === 1)
+    function toggleDefaults() {
+        if (editingDefaults) localPage.cancel()
+        else { localPage.load(); editingDefaults = true; localPage.forceActiveFocus() }
+    }
     onReducedChanged: if (disc) disc.reduceMotion(reduced)
     Component.onCompleted: disc.reduceMotion(reduced)
     Connections {
         target: room
         function onChanged() {
-            if (!v.entered) { settings.close(); sourceSheet.close(); presets.close() }
+            if (!v.entered) { roundSettings.close(); sourceSheet.close(); presets.close() }
             else password.clear()
         }
     }
@@ -49,23 +55,28 @@ ApplicationWindow {
         TitleBar { id: titleBar; width: parent.width; shell: win; model: room }
         Item {
             id: field
+            visible: !win.editingDefaults
             anchors { top: titleBar.bottom; bottom: footerBar.top; left: parent.left; right: parent.right }
             readonly property real infoTop: height - win.infoHeight - 12
             readonly property real centerHeight: win.portrait ? infoTop - 8 : height
+            readonly property real leftRailEnd: win.portrait ? width / 2 - 10 : disc.x + disc.width * .045 - 10
+            readonly property real railWidth: Math.min(270, leftRailEnd - (win.portrait ? 14 : 24))
+            readonly property real railTop: win.portrait ? infoTop : disc.y + disc.height / 2 - win.infoHeight / 2
             SpectrumDisc {
                 id: disc; objectName: "record"
-                width: Math.max(70, v.entered
+                parent: localPage.showDisc ? localPage.preview : field
+                width: localPage.showDisc ? Math.min(parent.width,parent.height) : Math.max(70, v.entered
                     ? Math.min(field.width*(win.portrait ? .83 : .48), field.centerHeight-song.height-8, 540)
                     : Math.min(field.width*(win.portrait ? .65 : .48), win.portrait ? field.height-login.height-20 : field.height-90, 480))
                 height: width
-                x: (v.entered || win.portrait ? field.width*.5 : field.width*.285) - width/2
-                y: v.entered ? Math.max(0,(field.centerHeight-height-song.height)/2)
+                x: localPage.showDisc ? (parent.width-width)/2 : (v.entered || win.portrait ? field.width*.5 : field.width*.285) - width/2
+                y: localPage.showDisc ? (parent.height-height)/2 : v.entered ? Math.max(0,(field.centerHeight-height-song.height)/2)
                              : win.portrait ? Math.max(0,(field.height-height-login.height)/2) : (field.height-height-45)*.46
             }
             Column {
                 id: song; spacing: 4
                 width: v.entered ? (!win.portrait? field.width*.53:field.width-40) : (win.portrait?field.width-40:field.width*.49)
-                anchors.horizontalCenter: disc.horizontalCenter
+                x: (v.entered || win.portrait ? field.width*.5 : field.width*.285) - width/2
                 y: disc.y+disc.height-8
                 visible: v.entered || !win.portrait
                 Word {
@@ -104,15 +115,14 @@ ApplicationWindow {
             }
 
             Column {
-                id: sessionInfo; visible: v.entered; spacing: 6
-                width: win.portrait ? field.width*.46-18 : field.width*.22-22
-                x: win.portrait ? 16 : 24
-                y: win.portrait ? field.infoTop : (field.height-height)/2
-                Word { text: v.demo ? "试听音源" : "房间主持"; color: muted; font.pixelSize: 14 }
-                Word { width: parent.width; text: v.demo ? "本地合成器" : v.host || "席位空闲"; font.pixelSize: 22; font.weight: Font.DemiBold }
+                id: sessionInfo; objectName: "hostRail"; visible: v.entered; spacing: 5
+                width: field.railWidth; x: field.leftRailEnd-width; y: field.railTop
+                Word { width: parent.width; horizontalAlignment: Text.AlignRight; text: v.demo ? "试听音源" : "房间主持"; color: muted; font.pixelSize: 15 }
+                Word { width: parent.width; horizontalAlignment: Text.AlignRight; text: v.demo ? "本地合成器" : v.host || "席位空闲"; font.pixelSize: 23; font.weight: Font.DemiBold }
                 RoomButton {
                     id: presetButton; objectName: "presetButton"
-                    width: Math.min(implicitWidth, parent.width); horizontalPadding: 6
+                    anchors.right: parent.right
+                    width: Math.min(implicitWidth, parent.width); horizontalPadding: 9
                     text: (v.demo ? "" : v.mine ? "房间 · " : v.following ? "跟随 · " : "自选 · ")+win.styleName+" ▾"
                     Accessible.name: "可视化预设，"+text
                     onClicked: presets.visible ? presets.close() : presets.open()
@@ -120,6 +130,7 @@ ApplicationWindow {
                         id: presets; objectName: "presets"; parent: presetButton
                         popupType: Popup.Item
                         y: presetButton.height+4
+                        x: presetButton.width-width
                         width: Math.min(172, presetButton.parent.width); modal: false; dim: false
                         font: uiFont
                         background: Rectangle { radius: 8; color: "#292e42"; border.color: "#535970" }
@@ -138,34 +149,32 @@ ApplicationWindow {
                     }
                 }
                 Item { visible: win.portrait && presets.visible; height: presets.implicitHeight; width: 1 }
+                Column {
+                    width: parent.width; spacing: 3; topPadding: 6
+                    visible: !!v.candidate || !!v.recognitionNotice
+                    Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!v.candidate; text: "耳朵一动"; color: "#d6c4ea"; font.pixelSize: 15 }
+                    Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!text; text: v.candidate; maximumLineCount: 2; wrapMode: Text.Wrap }
+                    Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!text; text: v.recognitionNotice; maximumLineCount: win.portrait && v.candidate ? 1 : 2; wrapMode: Text.Wrap; color: secondary }
+                }
             }
             Column {
-                id: signalInfo; visible: v.entered; spacing: 7
-                width: !win.portrait ? field.width*.23-22 : field.width*.54-22
-                x: !win.portrait ? field.width-width-20 : field.width-width-16
-                y: !win.portrait ? (field.height-height)/2 : field.infoTop
+                id: signalInfo; objectName: "audioRail"; visible: v.entered; spacing: 5
+                width: field.railWidth; x: field.width-field.leftRailEnd; y: field.railTop
                 Word { text: v.demo ? "播放音源" : "主持共享"; color: muted; font.pixelSize: 14 }
                 Word { width: parent.width; text: v.shared; font.pixelSize: 18; maximumLineCount: 2; wrapMode: Text.Wrap }
                 Item { width: 1; height: 6 }
                 Word { text: v.mine ? "本机输入" : "本机收听"; color: muted; font.pixelSize: 14 }
                 Word { width: parent.width; text: v.received; font.pixelSize: 18; maximumLineCount: 2; wrapMode: Text.Wrap }
-                Column {
-                    parent: win.portrait ? sessionInfo : signalInfo
-                    width: parent.width; spacing: 4
-                    visible: !!v.candidate || !!v.recognitionNotice
-                    Word { visible: !!v.candidate; text: "耳朵一动"; color: "#d6c4ea"; font.pixelSize: 15 }
-                    Word { width: parent.width; visible: !!text; text: v.candidate; maximumLineCount: 2; wrapMode: Text.Wrap }
-                    Word { width: parent.width; visible: !!text; text: v.recognitionNotice; maximumLineCount: win.portrait && v.candidate ? 1 : 2; wrapMode: Text.Wrap; color: secondary }
-                }
                 Word { width: parent.width; text: "播放延迟约 "+v.delay+" ms"; visible: v.delay>0; color: "#f4ba92" }
-                RoomButton { visible: v.delay>0; text: "立即同步"; onClicked: room.sync() }
+                RoomButton { visible: !v.mine && !v.demo && (v.playing || v.delay>0)
+                    text: "立即同步"; quiet: true; horizontalPadding: 3; implicitHeight: 30; onClicked: room.sync() }
             }
         }
 
         Rectangle {
             id: footerBar; anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
             height: implicitHeight
-            visible: v.entered; implicitHeight: visible ? bar.implicitHeight+24 : 0
+            visible: v.entered && !win.editingDefaults; implicitHeight: visible ? bar.implicitHeight+18 : 0
             color: "#1d2032"
             Rectangle { width: parent.width; height: 1; color: "#35394e" }
             ColumnLayout {
@@ -200,7 +209,7 @@ ApplicationWindow {
                         Layout.alignment: Qt.AlignRight
                         spacing: win.portrait ? 6 : 10
                         RoomButton { visible: !v.mine; text: v.want?"停止收听":"开始收听"; enabled:v.ready; onClicked: room.listen() }
-                        RoomButton { text: v.mine?"主持设置":win.portrait?"设置":"收听设置"; quiet:true; onClicked: settings.open() }
+                        RoomButton { visible: v.mine; text: "本轮同步"; quiet: true; onClicked: roundSettings.open() }
                         RoomButton { visible: !v.demo && v.canHost; primary:true; enabled:v.ready && !v.busy
                             text:v.mine?"下台":v.pending?"取消申请":v.host?"申请接替":"开始主持"
                             onClicked: if(v.mine||v.pending) room.leaveStage(""); else sourceSheet.open() }
@@ -209,6 +218,12 @@ ApplicationWindow {
             }
         }
 
+        LocalSettings {
+            id: localPage; objectName: "localSettings"; visible: win.editingDefaults
+            anchors { top: titleBar.bottom; bottom: parent.bottom; left: parent.left; right: parent.right }
+            roomModel: win.roomModel; portrait: win.portrait
+            onFinished: { win.editingDefaults = false; titleBar.focusSettings() }
+        }
     }
     Rectangle {
         visible: win.fold > .97
@@ -220,22 +235,11 @@ ApplicationWindow {
     }
     ResizeEdges { anchors.fill: parent; shell: win; visible: win.visibility === Window.Windowed && win.fold === 0 }
     Sheet {
-        id: settings; heading: v.mine?"主持设置":"收听设置"
-        onOpened: {
-            receive.currentIndex = v.receive==="Opus"?0:1; autoSync.checked=v.auto
-            interval.currentIndex=Math.max(0,v.intervals.indexOf(v.interval))
-            threshold.text=v.threshold===null||v.threshold===undefined?"":String(v.threshold/1000)
-        }
-        Word { visible: !v.demo&&!v.mine; text:"优先接收" }
-        ComboBox { id:receive; visible: !v.demo&&!v.mine; Layout.fillWidth:true; model:["Opus","无损 PCM"] }
-        CheckBox { id:autoSync; visible:!v.demo&&!v.mine; text:"自动同步" }
-        Word { visible:!v.demo&&!v.mine; text:"校准间隔（秒）" }
-        ComboBox { id:interval; visible:!v.demo&&!v.mine; Layout.fillWidth:true; model:v.intervals }
-        RoomButton { visible:!v.demo&&!v.mine; text:"立即同步"; enabled:v.playing; onClicked: {room.sync(); settings.close()} }
-        TextField { id:threshold; visible:v.mine; Layout.fillWidth:true; placeholderText:"同步阈值（秒），留空跟随房间" }
-        CheckBox { text:"减弱动态效果"; checked:win.reduced; onToggled:win.reduced=checked }
-        RoomButton { visible: !v.demo; primary:true; text:"应用"; enabled:!v.busy
-            onClicked: { if(v.mine) room.threshold(threshold.text); else room.preferences(receive.currentText,autoSync.checked,Number(interval.currentText)); settings.close() } }
+        id: roundSettings; heading: "本轮同步阈值"
+        onOpened: threshold.text=v.threshold==null?"":String(v.threshold/1000)
+        TextField { id:threshold; Layout.fillWidth:true; placeholderText:"秒，留空跟随房间" }
+        RoomButton { primary:true; text:"应用到本轮"; enabled:v.mine && !v.busy
+            onClicked: { room.threshold(threshold.text); roundSettings.close() } }
     }
     SourceSheet { id:sourceSheet; objectName: "sourceSheet"; room: win.roomModel }
     property var roomModel: room

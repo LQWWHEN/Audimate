@@ -5,6 +5,10 @@ import sounddevice
 class Output:
     def __init__(self, rate, bits):
         self.observe = None
+        self.playback_delay = None
+        self.pending = bytearray()
+        self.rate = rate
+        self.sample_bytes = 2 * (bits // 8)
         self.frame_bytes = rate // 50 * 2 * (bits // 8)
         self.stream = sounddevice.RawOutputStream(samplerate=rate, channels=2, dtype="int"+str(bits), latency="low")
 
@@ -20,7 +24,18 @@ class Output:
         underrun = False
         for start in range(0, len(pcm), self.frame_bytes):
             chunk = pcm[start:start + self.frame_bytes]
-            underrun |= bool(self.stream.write(chunk))
+            delay = round(self.rate * self.playback_delay() / 1000) * self.sample_bytes if self.playback_delay else 0
+            if delay or self.pending:
+                # Keep exactly the requested number of sample frames behind the
+                # analyzer. Shortening the delay releases all queued samples.
+                silence = bytes(min(len(chunk), max(0, delay - len(self.pending))))
+                self.pending.extend(chunk)
+                count = max(0, len(self.pending) - delay)
+                audible = silence + self.pending[:count]
+                del self.pending[:count]
+            else:
+                audible = chunk
+            underrun |= bool(self.stream.write(audible))
             self.observe(chunk)
         return underrun
 

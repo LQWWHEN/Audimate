@@ -317,6 +317,7 @@ class AudioListener(threading.Thread):
             from .playback import Output
             with Output(rate, bits) as output:
                 output.observe = getattr(self, "observe", None)
+                output.playback_delay = getattr(self, "playback_delay", None)
                 reported, underruns = 0, 0
                 first = True
                 while not self.cancel.is_set():

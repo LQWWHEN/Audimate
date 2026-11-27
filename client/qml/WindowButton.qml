@@ -30,6 +30,12 @@ T.Button {
                 c.clearRect(0, 0, 18, 18)
                 c.lineWidth = 1.4; c.strokeStyle = "#e0e1ee"; c.beginPath()
                 switch (glyph) {
+                case "settings":
+                    for (const [y, x] of [[4, 7], [9, 12], [14, 6]]) {
+                        c.moveTo(2,y); c.lineTo(x-2,y); c.moveTo(x+2,y); c.lineTo(16,y)
+                        c.moveTo(x+2,y); c.arc(x,y,2,0,Math.PI*2)
+                    }
+                    break
                 case "close": c.moveTo(4,4); c.lineTo(14,14); c.moveTo(14,4); c.lineTo(4,14); break
                 case "min": c.moveTo(3,11); c.lineTo(15,11); break
                 case "restore": c.rect(3,6,9,9); c.moveTo(6,4); c.lineTo(6,3); c.lineTo(15,3); c.lineTo(15,12); c.lineTo(14,12); break

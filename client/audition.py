@@ -38,6 +38,7 @@ class Audition(threading.Thread):
             audio = passage()
             with Output(48000, 16) as output:
                 output.observe = self.observe
+                output.playback_delay = getattr(self, "playback_delay", None)
                 while not self.cancel.is_set():
                     for start in range(0, len(audio), 3840):
                         if self.cancel.is_set():

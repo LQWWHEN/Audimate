@@ -1,6 +1,5 @@
 """Qt's room model. Network futures complete on the GUI clock; audio stays on workers."""
 from concurrent.futures import ThreadPoolExecutor
-import json
 import os
 from pathlib import Path
 import sys
@@ -11,6 +10,7 @@ from PySide6.QtCore import QObject, Property, QTimer, Signal, Slot
 from PySide6.QtGui import QColor, QImage
 
 from .covers import fetch_cover
+from . import local_settings
 from .disc import ICE, demo_art
 from .network import API, AudioListener, AudioUpload, RoomError, default_server
 from .rtc import RTCWorker
@@ -46,6 +46,7 @@ class RoomView(QObject):
     changed = Signal()
     sourcesChanged = Signal()
     submitted = Signal()
+    defaultsChanged = Signal()
 
     def __init__(self, dll, development=False):
         super().__init__()
@@ -67,16 +68,10 @@ class RoomView(QObject):
         self.next_poll = self.retry = 0
         self.fallback = ""
         self.sync_policy = SyncPolicy(time.monotonic())
-        self.pref_file = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Audimate" / "listening.json"
-        try:
-            prefs = json.loads(self.pref_file.read_text(encoding="utf8"))
-        except (OSError, ValueError):
-            prefs = {}
-        if not isinstance(prefs, dict):
-            prefs = {}
-        self.receive = prefs.get("receive", "Opus")
-        self.auto = bool(prefs.get("auto", True))
-        self.interval = prefs.get("interval", 5)
+        self.pref_file = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Audimate" / "desktop.json"
+        self.defaults = local_settings.load(self.pref_file)
+        self.preview_delay = None
+        self.receive, self.auto, self.interval = (self.defaults[k] for k in ("receive", "auto", "interval"))
         self.clock = QTimer(self)
         self.clock.timeout.connect(self.tick)
         self.clock.start(75)
@@ -93,6 +88,17 @@ class RoomView(QObject):
     @Property(str, constant=True)
     def address(self):
         return default_server()
+
+    @Property("QVariantMap", notify=defaultsChanged)
+    def localDefaults(self):
+        return self.defaults.copy()
+
+    def playback_delay(self):
+        return self.defaults["delay"] if self.preview_delay is None else self.preview_delay
+
+    @Slot(int)
+    def previewDelay(self, value):
+        self.preview_delay = value if 0 <= value <= 200 else None
 
     def refresh(self):
         h = self.state.get("host") or {}
@@ -137,9 +143,9 @@ class RoomView(QObject):
                     requests=self.state.get("requests",[]), style=style, following=not self.override,
                     flac=self.state.get("flac",False), rtc=self.state.get("livekit",False),
                     recognize=self.state.get("recognition_available",False), receive=self.receive,
-                    auto=self.auto, interval=self.interval, intervals=self.state.get("config",{}).get("intervals",[5]),
+                    auto=self.auto, interval=self.interval, intervals=self.state.get("config",{}).get("intervals",[5, 10, 30]),
                     threshold=h.get("sync_request_ms"), canHost=sys.platform=="win32",
-                    process=self.source.name if mine and self.source else "",
+                    findingSources=self.enumeration is not None, process=self.source.name if mine and self.source else "",
                     left=round(levels[0],3), right=round(levels[1],3))
         if self.demo:
             data.update(title="潮汐之间", artist="Audimate Ensemble", album="海岸线习作",
@@ -217,6 +223,7 @@ class RoomView(QObject):
             if self.want and not self.audition:
                 from .audition import Audition
                 self.audition = Audition(self.bind_spectrum(48000,16))
+                self.audition.playback_delay = self.playback_delay
                 self.audition.start()
             elif not self.want and self.audition:
                 self.stop_audio()
@@ -253,6 +260,7 @@ class RoomView(QObject):
             self.listener = RTCWorker(self.api,h) if rtc else AudioListener(self.api,h)
             rate,bits = (48000,16) if rtc or h["codec"]=="opus" else (h["rate"],h["bits"])
             self.listener.observe = self.bind_spectrum(rate,bits)
+            self.listener.playback_delay = self.playback_delay
             self.listener.start()
 
     def apply(self, state):
@@ -408,16 +416,19 @@ class RoomView(QObject):
             self.retry = 0
             self.reconcile()
 
-    @Slot(str, bool, int)
-    def preferences(self, receive, auto, interval):
-        self.receive,self.auto,self.interval = receive,auto,interval
+    @Slot("QVariantMap", result=str)
+    def saveDefaults(self, values):
         try:
-            self.pref_file.parent.mkdir(parents=True,exist_ok=True)
-            self.pref_file.write_text(json.dumps(dict(receive=receive,auto=auto,interval=interval)),encoding="utf8")
-        except OSError as exc:
-            self.fail(str(exc))
+            data = local_settings.validate(values)
+            local_settings.save(self.pref_file, data)
+        except (OSError, ValueError) as exc:
+            return str(exc)
+        self.defaults = data
+        self.receive,self.auto,self.interval = (data[k] for k in ("receive", "auto", "interval"))
+        self.defaultsChanged.emit()
         self.reconcile()
         self.refresh()
+        return ""
 
     @Slot(str)
     def preset(self, style):
@@ -436,6 +447,7 @@ class RoomView(QObject):
             return
         from .processes import list_sources
         self.enumeration = self.pool.submit(list_sources)
+        self.refresh()
 
     @Slot(str,int,int,str,bool,str,str)
     def requestStage(self,key,rate,bits,codec,recognize,threshold,style):
@@ -448,9 +460,13 @@ class RoomView(QObject):
             return
         try:
             self.format = AudioFormat(rate,bits)
-            value = threshold_ms(threshold,self.state["sync_policy"]["max_ms"])
         except ValueError:
-            self.fail("请检查采样率、位深或同步阈值。")
+            self.fail("请在本次参数中选择有效位深，并输入 8000 至 192000 Hz 之间的整百采样率。")
+            return
+        try:
+            value = threshold_ms(threshold,self.state["sync_policy"]["max_ms"])
+        except ValueError as exc:
+            self.fail(f"请调整本次参数中的同步阈值。{exc}")
             return
         self.source = src
         payload = dict(source=src.name,rate=rate,bits=bits,codec="opus" if codec.startswith("Opus") else "pcm",
