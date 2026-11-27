@@ -15,6 +15,10 @@ _QUALIFIER = re.compile(r"\(([^()]*)\)|\[([^\[\]]*)\]|\s+[-–—]\s+([^()\[\]]+
 _BARE_VERSION = re.compile(r"\s+(live|remix|acoustic|instrumental|demo|karaoke|radio edit|unplugged|mono|stereo)$")
 _VERSION = re.compile(r"\b(?:live|remix|mix|acoustic|instrumental|demo|karaoke|edit|unplugged|mono|stereo|remaster(?:ed)?|part|pt)\b|现场|現場|不插电|不插電|混音|伴奏|ライブ|リミックス")
 _MASTER = re.compile(r"(?:[0-9]{4} )?remaster(?:ed)?(?: [0-9]{4})?")
+_PERFORMANCE_CREDIT = re.compile(
+    r"\b(?:tributes?|covers?|karaoke|parody|impersonator|presents|versus|vs|feat|ft|featuring|"
+    r"performed by|in the style of|made famous by|originally by)\b|致敬|翻唱|伴奏|カバー|トリビュート")
+_QUALIFIED_ARTIST_SCORE = 0.90
 _LOCAL_VERSIONS = {"ライブ": "live", "现场": "live", "现场版": "live", "現場版": "live",
                    "リミックス": "remix", "混音版": "remix", "不插电": "unplugged", "不插電": "unplugged",
                    "伴奏": "instrumental"}
@@ -122,6 +126,25 @@ def appended_han_artist(left, right):
     return len(suffix) >= 2 and all(unicodedata.name(c, "").startswith("CJK UNIFIED IDEOGRAPH-") for c in suffix)
 
 
+def qualified_artist_match(left, right):
+    """None means both rosters have the same prefixes and ordinary scoring applies."""
+    def prefixes(names):
+        return {name.rsplit(":", 1)[0].strip() for name in names if ":" in name}
+
+    left_only, right_only = left - right, right - left
+    if prefixes(left_only) == prefixes(right_only):
+        return None
+    if len(left_only) != 1 or len(right_only) != 1:
+        return False
+    plain, qualified = sorted(left_only | right_only, key=len)
+    prefix, _, artist = qualified.partition(":")
+    prefix = prefix.strip()
+    return (qualified.count(":") == 1 and artist.strip() == plain and sum(c.isalpha() for c in plain) >= 4
+            and re.fullmatch(r"[^\W_]+(?:[ '.’\-][^\W_]+)*", prefix) is not None
+            and any(c.isalpha() for c in prefix) and not _PERFORMANCE_CREDIT.search(prefix)
+            and not _VERSION.search(prefix))
+
+
 @dataclass
 class Credits:
     left_title: str
@@ -149,6 +172,9 @@ class Credits:
     def fallback(self, policy):
         if self.conflict:
             return "", "录音版本冲突"
+        qualified = qualified_artist_match(self.left_artists, self.right_artists)
+        if qualified is False or (qualified and self.left_title != self.right_title):
+            return "", "冒号署名未能核实"
         if self.left_title == self.right_title and self.left_title and self.left_artists & self.right_artists:
             if len(self.left_artists ^ self.right_artists) == 1:
                 return "partial", "合作署名相差一人"
@@ -158,7 +184,7 @@ class Credits:
         if not a or not b or (min(len(a), len(b)) <= 3 and self.left_title != self.right_title):
             return "", "短曲名需要完全吻合"
         alias = self.left_title == self.right_title and appended_han_artist(self.left_artists, self.right_artists)
-        if not alias and (scripts(a) != scripts(b) or
+        if not (alias or qualified) and (scripts(a) != scripts(b) or
                           scripts("".join(self.left_artists)) != scripts("".join(self.right_artists))):
             return "", "跨文字名称须核实目录"
         # Long matching qualifiers must not conceal an unrelated short main title.
@@ -168,10 +194,15 @@ class Credits:
         title = similarity(a, b)
         if main_a and main_b:
             title = min(title, similarity(main_a, main_b))
-        artists = 1.0 if alias else artist_similarity(self.left_artists, self.right_artists)
+        if qualified:
+            artists = _QUALIFIED_ARTIST_SCORE
+        else:
+            artists = 1.0 if alias else artist_similarity(self.left_artists, self.right_artists)
         note = f"模糊核对 · 歌名 {title:.3f} · 艺人 {artists:.3f}"
         if alias:
             note += " · 完整拉丁艺名吻合，附加汉字艺名"
+        if qualified:
+            note += " · 冒号后完整艺名吻合"
         if title >= policy["recognition_title_min"] and artists >= policy["recognition_artist_min"]:
             return "fuzzy", note
         return "", note + " · 未达门槛"

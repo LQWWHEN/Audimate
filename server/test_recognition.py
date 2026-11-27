@@ -110,6 +110,50 @@ class RecognitionTests(unittest.TestCase):
         self.assertFalse(decision(plain, mixed, title="1968 Itinerary (Live)"))
         self.assertFalse(decision(plain, mixed, fuzzy=False))
 
+    def test_qualified_artist_uses_two_full_fingerprint_hits(self):
+        title = "Killstardo Abominate"
+        state = self.player(title, "Dethklok")
+        track = dict(id="test-recording", title=title, artist="Metalocalypse: Dethklok", album="Test album")
+        for quick, expected in ((True, "0/2"), (False, "1/2"), (False, "2/2")):
+            detail = self.replay(track, quick)["detail"]
+            self.assertIn(expected, detail)
+            self.assertIn("冒号后完整艺名吻合", detail)
+            self.assertIn("艺人 0.900", detail)
+            self.assertEqual(state.current, track if expected == "2/2" else None)
+        self.assertEqual(self.status()["source"], title + " - Dethklok")
+        self.assertEqual(self.status()["recognition"]["current"]["album"], track["album"])
+
+    def test_qualified_artist_boundaries_and_policy(self):
+        title = "Killstardo Abominate"
+        qualified = "Metalocalypse: Dethklok"
+
+        def decision(artist, player, *, song=title, **policy):
+            credits = recognition.Credits.compare(dict(title=title, artist=artist), dict(title=song, artist=player),
+                                                  recognition.SUFFIX_FILE.read())
+            return credits.fallback(dict(DEFAULT, **policy))[0]
+
+        self.assertEqual(decision("Guest & Dethklok", "Series Name：  DETHKLOK & Guest"), "fuzzy")
+        self.assertEqual(decision(qualified, "Dethklok", recognition_artist_min=0.90), "fuzzy")
+        self.assertFalse(decision(qualified, "Dethklok", recognition_artist_min=0.91))
+        self.assertFalse(decision(qualified, "Dethklok", recognition_fuzzy=False))
+        for artist, player, song in (
+            (qualified, "Dethklok", "Killstardo Abominat"),
+            (qualified, "Dethklok", title + " (Live)"),
+            (qualified, "Dethklo", title),
+            (qualified, "Other Series: Dethklok", title),
+            (qualified + " & Guest", "Dethklok", title),
+            ("Tribute to: Dethklok", "Dethklok", title),
+            ("Cover Band: Dethklok", "Dethklok", title),
+            ("金属翻唱：Dethklok", "Dethklok", title),
+            ("Metalocalypse: Dethklok & Guest", "Guest", title),
+            ("Metalocalypse:Metal: Dethklok", "Dethklok", title),
+            ("Metalocalypse: DJ", "DJ", title),
+            ("Metalocalypse Dethklok", "Dethklok", title),
+        ):
+            with self.subTest(artist=artist, player=player, song=song):
+                self.assertFalse(decision(artist, player, song=song))
+        self.assertEqual(decision(qualified, "Metalocalypse: Dethklock"), "fuzzy")
+
     def test_partial_creds_and_fuzzy_guards(self):
         state = self.player("Long Artist Collaboration", "Alice")
         track = dict(id="1", title="Long Artist Collaboration (ft. Bob)", artist="Alice")

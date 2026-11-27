@@ -169,6 +169,8 @@ Shazam 的指纹接口或本地化目录首次返回 HTTP 429 时，该房间立
 
 有些播放器会把两种艺名连写。例如，`Jo's Moving Day乔迁日` 中保留了 Shazam 返回的完整艺名 `Jo’s Moving Day`。当规范化曲名一致、版本相容、其余合作艺人一致时，可按模糊兜底累计两次完整窗口确认。该规则要求拉丁艺名至少含四个字母，后附至少两个汉字，可用圆括号包住。运维事件会标出「附加汉字艺名」。仅有译名时仍须由同一 Shazam ID 的本地化目录核实。
 
+艺人目录有时带前缀，例如 `Metalocalypse: Dethklok`。当一侧比另一侧多出单个冒号前缀，且规范化曲名、冒号后的完整艺名和其余合作艺人均吻合时，艺人按此规则计 0.90 分。艺名须至少含四个字母，翻唱、致敬等表演说明及录音版本冲突会拦截这条规则。艺人门槛高于 0.90 时该证据不足。默认设置下，运维可看到「冒号后完整艺名吻合」及两个完整窗口的确认进度。
+
 真实识别验收使用 ShazamIO 仓库 `examples/data/Gloria.ogg`，将其前 28 秒转换为双声道 PCM WAV，设置 `AUDIMATE_RECOGNITION_WAV` 为文件绝对路径后运行 `python -m unittest client.test_recognition_live -v`。用例需要 Windows、Chrome、Playwright 和服务端识别依赖。可在隔离的本地 LiveKit 环境设置 `AUDIMATE_RECOGNITION_RTC=1` 验证 Opus 主持。
 
 ## 验证
