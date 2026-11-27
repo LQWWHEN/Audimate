@@ -30,6 +30,22 @@
 
 ## 测试
 
+### Windows x64 单文件测试版
+
+测试者可以直接双击 `Audimate-Windows-x64.exe`，无需单独安装 Python、Qt 或采音 DLL。首次打开会将运行库解包到当前用户的临时目录。登录页的「试听可视化」可离线检查出声、频谱、窗口缩放和竖屏贴边。在「服务器地址」可查看或更换联机测试地址。反馈兼容性问题时，请附 Windows 版本与内部版本号（`winver`）、显示缩放比例、音频输出设备，以及出现问题的操作步骤。
+
+开发者在 Windows x64 上先按[采音模块构建说明](../host/capture/README.md)生成 `build/Release/audimate_capture.dll`，然后在仓库根目录使用独立环境打包。以下示例使用 Python 3.12 x64。
+
+```powershell
+py -3.12 -m venv build/win-pack-env
+.\build\win-pack-env\Scripts\python.exe -m pip install -r client/requirements.txt PySide6-Essentials==6.12.0 PyInstaller==6.22.3
+.\build\win-pack-env\Scripts\python.exe client/package_windows.py
+```
+
+输出为 `build/distribution/Audimate-Windows-x64.exe`。指定默认测试站时，在打包命令末尾添加 `--server https://你的测试域名`。省略该参数时默认连接本机服务。
+
+### 源码回归
+
 以下命令覆盖 Qt 原型、旧版 Tk 控件与服务端预设授权，在本机临时房间短暂播放合成测试音。实机用例使用默认构建目录的 DLL。
 
 ```powershell
