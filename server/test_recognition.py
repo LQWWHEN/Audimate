@@ -1,6 +1,8 @@
 import asyncio
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import tempfile
 import threading
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -76,11 +78,36 @@ class RecognitionTests(unittest.TestCase):
                 lookup.assert_not_called()
             self.assertEqual(self.status()["source"], title["title"]+" - "+artist)
             self.assertEqual(self.status()["recognition"]["current"], result)
-            self.assertIn("母带版本标记等价", self.room.monitor.events[0]["detail"])
+            self.assertIn("配置的曲名后缀等价", self.room.monitor.events[0]["detail"])
         for suffix in ("(Live)", "(Remix)", "(Acoustic)", "(Demo)", "(Instrumental)", "(Part II)"):
             self.assertFalse(recognition.song_title_match(base+suffix, base))
         self.assertFalse(recognition.song_title_match("A (2014 Remaster)", "A (1990 Remaster)"))
         self.assertFalse(recognition.title_agreement(result, dict(title=base+"(Remastered)", artist="Tribute Band")))
+
+    def test_suffix_file_reload_and_localized_decision_cache(self):
+        track = dict(id="42", title="Song", artist="Artist")
+        state = recognition.Recognition(0, dict(title="歌名（2014 母带+）", artist="艺人"))
+        alias = dict(title="歌名", artist="艺人")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "suffixes.txt"
+            config = recognition.SuffixFile(path)
+            path.write_text("# test\n母带+\n", encoding="utf-8-sig")
+            with patch.object(recognition, "SUFFIX_FILE", config), patch.object(
+                    recognition, "identify", AsyncMock(return_value=track)), patch.object(
+                    recognition, "localized_names", AsyncMock(return_value=alias)) as lookup:
+                self.assertEqual(asyncio.run(state.query(b"", None))[1], "localized")
+                self.assertIn("复用", asyncio.run(state.query(b"", None))[2])
+                lookup.assert_awaited_once()
+                self.assertEqual(recognition.song_title_match("Song - 母带+ 2014", "Song"), "suffix")
+                self.assertFalse(recognition.song_title_match("Song (母带带)", "Song"))
+                self.assertFalse(recognition.song_title_match("Song (母带+ 2014)", "Song (母带+ 2015)"))
+                path.write_bytes(b"\xff\xfe")
+                with self.assertLogs(recognition.__name__, level="WARNING"):
+                    self.assertEqual(recognition.song_title_match("歌名 (母带+)", "歌名"), "suffix")
+                path.write_text("", encoding="utf-8")
+                self.assertFalse(asyncio.run(state.query(b"", None))[1])
+                self.assertFalse(recognition.song_title_match("Song (母带+)", "Song"))
+                self.assertEqual(recognition.song_title_match("Песня", "ПЕСНЯ"), "exact")
 
     def test_localized_confirmation_and_cache(self):
         player = dict(title="モルヒネ", artist="椎名林檎")

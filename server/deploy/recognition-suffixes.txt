@@ -1,0 +1,4 @@
+# One equivalent title suffix per line. Case, character width and spaces are normalized.
+# Parentheses, brackets, dash separators and an optional mastering year are handled by the matcher.
+Remaster
+Remastered

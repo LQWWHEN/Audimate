@@ -147,6 +147,8 @@ python3 ops_admin.py --db /var/lib/audimate/accounts.sqlite3 revoke existing-use
 
 核对播放器标题时可忽略末尾独立的 `(Remastered)`、`[2014 Remaster]` 等母带标记。两边均标注年份时年份须一致，现场、混音等版本标记参与匹配。涉及中日文且文本核对失败时，服务端按指纹返回的 Shazam ID 请求本地化曲目详情。歌名与歌手均须在同一 ID 的名称中得到验证。目录核对使用原有 8 秒预算中的最多 3 秒。当前播放器标题下会短时复用核对结果，切歌后重新核对。主持端和听众端显示播放器原文，专辑、封面与发行时间来自命中的目录版本。
 
+等价后缀清单为 [deploy/recognition-suffixes.txt](deploy/recognition-suffixes.txt)。每行填写一项 UTF-8 字面文本，例如 `Remastered` 或 `母带重制版`，空行及以 `#` 开头的注释会跳过。服务自动处理括号、方括号、带空格的连接号及可选年份。清空文件即可关闭后缀等价。运维可用环境变量 `AUDIMATE_RECOGNITION_SUFFIX_FILE` 指向独立文件。原子替换该文件后，从下一次标题核对起生效；已确认的曲目不追溯。文件读取失败时沿用进程最近成功加载的规则，尚无有效配置时仅关闭后缀等价。
+
 开发版运维页的「排障事件 → 识别」显示 Shazam 实际返回的歌名、歌手、录音 ID，以及查询返回的专辑和发行时间。每次命中标明候选、已确认或与播放器标题不符。超时和失败也可在「异常」筛选中查看，包含异常类型、最后观测到的阶段及该阶段耗时、HTTP 尝试次数与各次响应状态。「未收到响应头」表示截至查询结束仍未观测到响应头。日志级别「仅异常」只新增失败和超时事件，「关闭」停止记录并清空事件。
 
 真实识别验收使用 ShazamIO 仓库 `examples/data/Gloria.ogg`，将其前 28 秒转换为双声道 PCM WAV，设置 `AUDIMATE_RECOGNITION_WAV` 为文件绝对路径后运行 `python -m unittest client.test_recognition_live -v`。用例需要 Windows、Chrome、Playwright 和服务端识别依赖。可在隔离的本地 LiveKit 环境设置 `AUDIMATE_RECOGNITION_RTC=1` 验证 Opus 主持。

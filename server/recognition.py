@@ -2,6 +2,9 @@
 import asyncio
 from importlib.util import find_spec
 import io
+import logging
+import os
+from pathlib import Path
 import re
 import threading
 import time
@@ -15,9 +18,6 @@ QUERY_TIMEOUT_S = 8
 CATALOG_TIMEOUT_S = 3
 AVAILABLE = find_spec("shazamio") is not None
 
-# A mastering credit can be absent on one storefront. Other version labels are significant.
-_REMASTER = r"(?:(?:19|20)[0-9]{2}\s+)?remaster(?:ed)?(?:\s+(?:19|20)[0-9]{2})?"
-_REMASTER_SUFFIX = re.compile(rf"(?:\s*\({_REMASTER}\)|\s*\[{_REMASTER}\]|\s+[-–—]\s*{_REMASTER})$")
 _KANA = re.compile(r"[\u3041-\u3096\u30a1-\u30fa]")
 _HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\U00020000-\U0002fa1f]")
 
@@ -26,27 +26,61 @@ def normalize(text):
     return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
-def song_title_match(left, right):
+class SuffixFile:
+    def __init__(self, path):
+        self.path = Path(path)
+        self.lock = threading.Lock()
+        self.last_read = None
+        self.pattern = re.compile(r"(?!)")
+
+    def read(self):
+        with self.lock:
+            try:
+                text = self.path.read_text(encoding="utf-8-sig")
+            except (OSError, UnicodeError) as exc:
+                error = (type(exc), getattr(exc, "errno", None))
+                if self.last_read != error:
+                    logging.getLogger(__name__).warning("无法读取曲名后缀配置 %s，沿用上次规则：%s", self.path, type(exc).__name__)
+                self.last_read = error
+                return self.pattern
+            if text != self.last_read:
+                labels = {normalize(line) for line in text.splitlines() if line.strip() and not line.lstrip().startswith("#")}
+                values = "|".join(re.escape(label) for label in sorted(labels))
+                year = r"(?:19|20)[0-9]{2}"
+                tag = rf"(?:{year} )?(?:{values})(?: {year})?"
+                self.pattern = re.compile(rf"(?:\s*\({tag}\)|\s*\[{tag}\]|\s+[-–—]\s*{tag})$" if labels else r"(?!)")
+                self.last_read = text
+            return self.pattern
+
+
+SUFFIX_FILE = SuffixFile(os.getenv("AUDIMATE_RECOGNITION_SUFFIX_FILE") or
+                         Path(__file__).with_name("deploy") / "recognition-suffixes.txt")
+
+
+def song_title_match(left, right, suffixes=None):
     left, right = normalize(left), normalize(right)
     if left == right:
         return "exact"
 
-    def mastering(text):
-        suffix = _REMASTER_SUFFIX.search(text)
+    if suffixes is None:
+        suffixes = SUFFIX_FILE.read()
+
+    def split_suffix(text):
+        suffix = suffixes.search(text)
         if not suffix:
             return text, None
         return text[:suffix.start()].rstrip(), re.search(r"[0-9]{4}", suffix[0])
-    left_name, left_year = mastering(left)
-    right_name, right_year = mastering(right)
+    left_name, left_year = split_suffix(left)
+    right_name, right_year = split_suffix(right)
     if left_name and left_name == right_name and not (left_year and right_year and left_year[0] != right_year[0]):
-        return "remaster"
+        return "suffix"
     return ""
 
 
-def title_agreement(track, title):
+def title_agreement(track, title, suffixes=None):
     if normalize(track["artist"]) != normalize(title["artist"]):
         return ""
-    return song_title_match(track["title"], title["title"])
+    return song_title_match(track["title"], title["title"], suffixes)
 
 
 def catalog_locales(title, match):
@@ -71,10 +105,10 @@ async def localized_names(key, language, country):
     return None
 
 
-async def check_catalog(track, player, locales, deadline):
+async def check_catalog(track, player, locales, deadline, suffixes):
     artist = normalize(player["artist"])
     artist_ok = normalize(track["artist"]) == artist
-    title_ok = bool(song_title_match(track["title"], player["title"]))
+    title_ok = bool(song_title_match(track["title"], player["title"], suffixes))
     problem = None
     for index, (language, country) in enumerate(locales):
         # Reserve time for another storefront when the first one is slow or unavailable.
@@ -87,7 +121,7 @@ async def check_catalog(track, player, locales, deadline):
         if not alias:
             continue
         artist_ok = artist_ok or normalize(alias["artist"]) == artist
-        title_ok = title_ok or bool(song_title_match(alias["title"], player["title"]))
+        title_ok = title_ok or bool(song_title_match(alias["title"], player["title"], suffixes))
         if artist_ok and title_ok:
             return "localized", "同一 Shazam ID 的本地化曲名与歌手吻合", 120
     if problem:
@@ -223,23 +257,24 @@ class Recognition:
         match = await identify(wav, trace)
         if not match or not self.title:
             return match, "", ""
-        agreement = title_agreement(match, self.title)
+        suffixes = SUFFIX_FILE.read()
+        agreement = title_agreement(match, self.title, suffixes)
         if agreement:
-            return match, agreement, "母带版本标记等价" if agreement == "remaster" else ""
+            return match, agreement, "配置的曲名后缀等价" if agreement == "suffix" else ""
         locales = catalog_locales(self.title, match)
         key = match["id"]
         if not locales or not re.fullmatch(r"[0-9]{1,20}", key):
             return match, "", ""
         if self.last_catalog:
-            prior, expires, reason, note = self.last_catalog
-            if prior == key and expires > time.monotonic():
+            prior, prior_suffixes, expires, reason, note = self.last_catalog
+            if prior == key and prior_suffixes == suffixes and expires > time.monotonic():
                 return match, reason, note + " · 复用目录核对"
 
         # Only one worker uses this Recognition. Its cache expires with the player title.
         # The optional catalog check shares the original deadline and never discards a fingerprint hit.
         start = time.monotonic()
-        reason, note, ttl = await check_catalog(match, self.title, locales, min(start + CATALOG_TIMEOUT_S, deadline))
-        self.last_catalog = (key, time.monotonic()+ttl, reason, note)
+        reason, note, ttl = await check_catalog(match, self.title, locales, min(start + CATALOG_TIMEOUT_S, deadline), suffixes)
+        self.last_catalog = (key, suffixes, time.monotonic()+ttl, reason, note)
         return match, reason, f"{note} · 目录核对 {round((time.monotonic()-start)*1000)} ms"
 
     def schedule(self, room, rate, width):
