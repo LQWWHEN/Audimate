@@ -198,7 +198,8 @@ function render(s) {
   }));
   byId("members").replaceChildren(...s.members.map(member => {
     const row = document.createElement("tr");
-    let state = member.host ? "主持" : member.pulling ? "拉流中" : "在线";
+    let state = member.host ? (member.control_grace ? "主持 · 控制连接超时" : "主持")
+      : member.pulling ? "接收中" : member.want_listen ? "等候收听" : "在线";
     if (member.pending) state += " · 申请中";
     for (const value of [member.name, member.client, state, duration(member.joined_s), member.seen_s + " 秒前", displayBytes(member.rx), displayBytes(member.tx)]) {
       row.append(node("td", value));

@@ -212,9 +212,30 @@ class OnlineTest(unittest.TestCase):
             def decide_from_room(title):
                 peer.request("stage/request", peer_source)
                 until(lambda: ui.state["requests"])
-                row = ui.requests.winfo_children()[0]
-                next(widget for widget in row.winfo_children() if widget.cget("text") == title).invoke()
-                until(lambda: not ui.state["requests"])
+                def click():
+                    row = ui.requests.winfo_children()[0]
+                    next(widget for widget in row.winfo_children() if widget.cget("text") == title).invoke()
+                if title == "拒绝":
+                    polling, resume = threading.Event(), threading.Event()
+                    request = ui.api.request
+                    def delayed_poll(route, *args, **kwargs):
+                        response = request(route, *args, **kwargs)
+                        if route.startswith("room?") and not polling.is_set():
+                            polling.set()
+                            resume.wait(5)
+                        return response
+                    with patch.object(ui.api, "request", delayed_poll):
+                        try:
+                            until(polling.is_set)
+                            click()
+                            until(lambda: not ui.state["requests"], timeout=2)
+                        finally:
+                            resume.set()
+                    until(lambda: ui.poll_future is None or ui.poll_generation == ui.control_generation)
+                    self.assertFalse(ui.state["requests"])
+                else:
+                    click()
+                    until(lambda: not ui.state["requests"])
 
             decide_from_room("拒绝")
             self.assertFalse(peer.request("room")["pending"])

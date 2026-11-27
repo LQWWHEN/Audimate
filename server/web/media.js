@@ -172,6 +172,7 @@ class Listening {
     while (!this.closed) {
       if (track) {
         const metrics = await rtcMetrics(track);
+        this.position = metrics.bytes;
         if (detailedTiming() && sess.timing) metrics.detail = {...metrics.detail, ...sess.timing};
         if (this.closed) return;
         const source = room?.host;
@@ -240,6 +241,7 @@ class Listening {
       const gap = after >= 0 && seq !== after + 1;
       if (gap) diagnostics(h, "gap", "pcm", {discarded: Math.max(0,seq-after-1), ...(trace ? {detail} : {})});
       after = seq;
+      this.position = seq;
       const view = new DataView(compressed ? await flacPacket("decode_packet",wire,rate,bits) : wire);
       if (this.closed) return;
       const width = bits/8, buffer = ctx.createBuffer(2, view.byteLength/(width*2),rate);

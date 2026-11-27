@@ -86,6 +86,77 @@ class Runtime(unittest.TestCase):
             self.alice.request("stage/leave",dict(stream=host["stream"]))
             self.assertFalse(media.current_grant(token,self.app.room))
 
+    def test_conditional_room_views_interest_and_audio_progress(self):
+        for peer, name in ((self.alice, "host"), (self.bob, "peer")):
+            peer.request("register", dict(name=name, password="local-test-password"))
+        self.bob.request("room?want=1")
+        host = self.alice.request("stage/request", self.choice)
+        stream = host["host"]["stream"]
+        view = self.bob.request("room?want=1")
+        poll = "room?want=1&since=" + view["cursor"]
+        ack = {"unchanged": True, "cursor": view["cursor"]}
+        self.assertEqual(self.bob.request(poll), ack)
+        self.assertIsNone(self.bob.request("audio?stream=" + stream))
+        room = self.app.room
+        listener = next(m for m in room.members.values() if m.name == "peer")
+        self.assertTrue(listener.want_listen)
+        self.assertIsNone(listener.last_pull)
+        room.monitor.set_level("off")
+        for transport in ("pcm", "rtc"):
+            received = poll + f"&stream={stream}&transport={transport}&position=2"
+            self.assertEqual(self.bob.request(received), ack)
+            observed = listener.last_pull
+            self.assertIsNotNone(observed)
+            self.bob.request(received)
+            self.assertEqual(listener.last_pull, observed)
+        self.bob.request("stage/request", self.choice)
+        changed = self.alice.request("room?since=" + host["cursor"])
+        self.assertEqual(changed["requests"][0]["name"], "peer")
+        mine = self.bob.request(poll)
+        self.assertTrue(mine["pending"])
+        self.assertFalse(mine["requests"])
+        self.assertNotEqual(mine["cursor"], changed["cursor"])
+        self.alice.request("stage/leave", dict(stream=stream))
+        self.assertTrue(listener.want_listen)
+        self.assertIsNone(listener.last_pull)
+        self.bob.request("room?want=0")
+        self.assertFalse(listener.want_listen)
+        self.assertIn("config", self.bob.request("room"))
+
+    def test_audio_does_not_renew_host_past_fixed_grace(self):
+        self.alice.request("register", dict(name="host", password="local-test-password"))
+        self.bob.request("register", dict(name="peer", password="local-test-password"))
+        room = self.app.room
+        with patch.object(room, "start_watcher"), patch("time.monotonic", return_value=100) as clock:
+            host = self.alice.request("stage/request", self.choice)["host"]
+            key = room.host["key"]
+            audio = "audio?stream=" + host["stream"]
+            for second in range(1, 30):
+                clock.return_value = 100 + second
+                self.alice.request(audio, bytes(120))
+                self.assertEqual(room.members[key].seen, 100)
+            self.assertTrue(room.host_in_grace(room.members[key], 129))
+            self.bob.request("stage/request", self.choice)
+            clock.return_value = 130
+            with self.assertRaisesRegex(OSError, "409"):
+                self.alice.request(audio, bytes(120))
+            self.assertIsNone(room.host)
+            self.assertTrue(self.bob.request("stage/request", self.choice)["hosting"])
+            clock.return_value = 151
+            self.assertIsNone(self.bob.request("room")["host"])
+
+    def test_heartbeat_recovers_host_during_grace(self):
+        self.alice.request("register", dict(name="host", password="local-test-password"))
+        room = self.app.room
+        with patch.object(room, "start_watcher"), patch("time.monotonic", return_value=100) as clock:
+            stream = self.alice.request("stage/request", self.choice)["host"]["stream"]
+            clock.return_value = 119
+            self.alice.request("audio?stream=" + stream, bytes(120))
+            clock.return_value = 121
+            self.assertTrue(self.alice.request("room?want=0")["hosting"])
+            clock.return_value = 131
+            self.assertTrue(self.alice.request("room?want=0")["hosting"])
+
     def test_member_timeout_configuration(self):
         password = manage(self.db, "create", "operator")
         self.ops("login", dict(name="operator", password=password))

@@ -237,6 +237,36 @@ async function run() {
       () => document.querySelector("#stage").textContent === "下台",
     );
     assert.ok(await host.isVisible("#stopSourceHelp"));
+    if (process.argv.includes("--control-latency")) {
+      // Same-machine browser clocks include both the simulated source picker and the host's DOM update.
+      const delays = [];
+      for (let index = 0; index < 20; index++) {
+        await listener.waitForFunction(() => room?.host && !room.pending && !input && !$("stage").disabled);
+        await listener.waitForTimeout((index * 137) % 800);
+        await listener.evaluate(() => $("stage").addEventListener("click", () => {
+          window.requestClicked = performance.timeOrigin + performance.now();
+        }, {once:true, capture:true}));
+        await host.evaluate(() => {
+          window.applicationVisible = new Promise(resolve => {
+            const observer = new MutationObserver(() => {
+              if (!$("requests").childElementCount) return;
+              observer.disconnect();
+              resolve(performance.timeOrigin + performance.now());
+            });
+            observer.observe($("requests"), {childList:true});
+          });
+        });
+        await listener.click("#stage");
+        await host.locator("#requests button", {hasText:"拒绝"}).waitFor();
+        delays.push((await host.evaluate(() => window.applicationVisible)) - (await listener.evaluate(() => window.requestClicked)));
+        await host.locator("#requests button", {hasText:"拒绝"}).click();
+        await host.waitForFunction(() => !$("requests").childElementCount);
+      }
+      await listener.waitForFunction(() => !room.pending && !input);
+      delays.sort((a,b) => a-b);
+      console.log("request click to host display (20 local samples): P50 %d ms, P95 %d ms",
+        Math.round(delays[9]), Math.round(delays[18]));
+    }
     await listener.waitForFunction(
       () => !document.querySelector("#listen").disabled,
     );

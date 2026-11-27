@@ -58,6 +58,25 @@ class Member:
     ended_at: float = -math.inf
     fault_ids: deque = field(default_factory=lambda: deque(maxlen=24))
     peer_id: str = field(default_factory=lambda: secrets.token_hex(6))
+    want_listen: bool | None = None
+    progress: tuple | None = None
+    revision: int = 0
+    last_view: bytes | None = None
+
+    def heartbeat(self, query, host):
+        self.want_listen = query["want"] == ["1"]
+        if not self.want_listen or not host:
+            self.last_pull = self.progress = None
+            return
+        position = query.get("position", [""])[0]
+        transport = query.get("transport", [""])[0]
+        if (query.get("stream") != [host["stream"]] or transport not in ("pcm", "rtc")
+                or not position.isascii() or not position.isdecimal() or len(position) > 16):
+            return
+        current = (transport, int(position))
+        if current[1] and (self.progress is None or transport != self.progress[0] or current[1] > self.progress[1]):
+            self.last_pull = time.monotonic()
+        self.progress = current
 
 
 def client_type(agent):
@@ -117,7 +136,7 @@ class Monitor:
             member.last_fault = now
         else:
             member.last_sample = now
-        if event == "play":
+        if event == "play" and member.want_listen is None:
             member.last_pull = now
         if self.level == "off" or (self.level == "errors" and event not in ("error", "overload", "gap", "disconnect")):
             return
@@ -258,6 +277,7 @@ class Monitor:
             listening = bool(host and not is_host and member.last_pull is not None and now - member.last_pull <= 7)
             pulling += listening
             members.append(dict(name=member.name, client=member.client, host=is_host, pulling=listening,
+                                want_listen=member.want_listen, control_grace=is_host and room.host_in_grace(member, now),
                                 joined_s=int(now - member.joined), seen_s=int(now - member.seen),
                                 pending=key in room.pending, rx=member.uploaded, tx=member.downloaded))
             if self.development:

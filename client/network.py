@@ -400,6 +400,7 @@ class AudioListener(threading.Thread):
                     if headers.get("X-Reset") == "1":
                         self.notice = "已到缓存边界，正在重新同步"
                     seq = new_seq
+                    self.position = seq
                     captured = headers.get("X-Captured-Ms")
                     self.packets.put_nowait((pcm, float(captured) if captured else None, float(headers["X-Behind-Ms"]), fetched, detail))
                 else:

@@ -16,8 +16,11 @@ let mode = "login",
 let requesting = false, leaving = false,
   stageGeneration = 0,
   changes = 0;
+let fullRefresh = true;
+const retiredViews = new Set();
 
 async function api(path, data) {
+  const session = epoch;
   const response = await fetch(
     "/api/" + path,
     data === undefined
@@ -29,6 +32,7 @@ async function api(path, data) {
         },
   );
   const result = await response.json();
+  if (session !== epoch) throw Error("登录会话已变更");
   if (!response.ok) {
     if (response.status === 401 && name) {signedOut(); note(result.error || "请重新登录");}
     throw Error(result.error || "连接失败");
@@ -74,6 +78,8 @@ function enter(user) {
   $("room").hidden = $("account").hidden = false;
   note("");
   firstRoom = true;
+  fullRefresh = true;
+  retiredViews.clear();
   clockOffset = null;
   calibrate().catch(() => {});
   poll(epoch);
@@ -155,14 +161,28 @@ $("logout").onclick = async () => {
 };
 async function poll(version) {
   if (epoch !== version) return;
-  const before = changes;
-  try {
-    const state = await api("room" + (playback?.track ? "?listen="+playback.host.stream : ""));
-    if (epoch === version && before === changes && !requesting && !leaving) render(state);
-  } catch (e) {
-    if (epoch === version) note(e.message);
+  const before = changes, started = performance.now();
+  const params = new URLSearchParams({want: listening ? "1" : "0"});
+  if (room?.cursor && !fullRefresh) params.set("since", room.cursor);
+  if (playback?.position > 0) {
+    params.set("stream", playback.host.stream);
+    params.set("transport", playback.transport);
+    params.set("position", String(playback.position));
   }
-  if (epoch === version) timer = setTimeout(() => poll(version), 1100);
+  try {
+    const state = await api("room?" + params);
+    if (epoch === version && before === changes && !requesting && !leaving) {
+      fullRefresh = false;
+      if (!state.unchanged) render(state);
+      else if (room && listening && !playback) refreshPlayback();
+    }
+  } catch (e) {
+    if (epoch === version) {
+      fullRefresh = true;
+      note(e.message);
+    }
+  }
+  if (epoch === version) timer = setTimeout(() => poll(version), 800 - (performance.now() - started) % 800);
 }
 function pcmLabel(host) {
   return host.compression === "flac" ? "无损 PCM · FLAC 压缩" : "无损 PCM";
@@ -188,6 +208,11 @@ function renderSong(info) {
 }
 function render(state) {
   const previous = room;
+  if (state.cursor && previous?.cursor) {
+    const [view, rev] = state.cursor.split("."), [oldView, oldRev] = previous.cursor.split(".");
+    if (retiredViews.has(view) || (view === oldView && Number(rev) < Number(oldRev))) return;
+    if (view !== oldView) retiredViews.add(oldView);
+  }
   room = state;
   const h = room.host;
   if (firstRoom) {
@@ -294,7 +319,7 @@ async function leave(state = room, reason) {
   if (room) render(room);
   try {
     const updated = await api("stage/leave", { stream, ...(reason && detailedTiming() ? {reason} : {}) });
-    if (version === epoch) room = updated;
+    if (version === epoch) render(updated);
   } catch (e) {
     if (version === epoch) note(e.message);
   } finally {

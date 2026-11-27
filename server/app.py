@@ -30,6 +30,8 @@ WEB = Path(__file__).with_name("web")
 TTL = 7 * 86400
 CAPACITY = 19
 OPS_TTL = 8 * 3600
+HOST_CONTROL_GRACE_S = 10
+FRESH_AUDIO_S = 3
 
 
 def password_hash(password, salt):
@@ -97,6 +99,7 @@ class Room:
         self.stage_since = self.last_audio = None
         self.watching = False
         self.lease_grace_until = 0
+        self.host_control_until = None
 
     def apply_limits(self, config, overrides):
         if self.recognition and self.recognition.title and any(config[k] != self.policy[k] for k in FUZZY_FIELDS):
@@ -140,9 +143,15 @@ class Room:
 
     def watch(self):
         while True:
-            time.sleep(2)
             with self.lock:
-                self.expire(time.monotonic())
+                now = time.monotonic()
+                self.expire(now)
+                wait = 2
+                if self.host and self.host["key"] in self.members:
+                    deadline = max(self.members[self.host["key"]].seen + self.lease_s, self.lease_grace_until)
+                    if self.host_control_until is not None:
+                        deadline = self.host_control_until
+                    wait = min(wait, max(.01, deadline - now))
                 pending = list(self.monitor.service_pending)
                 self.monitor.service_pending.clear()
                 epoch = self.log_epoch
@@ -153,6 +162,7 @@ class Room:
                     return
             if pending and self.flush_service:
                 self.flush_service(pending, epoch)
+            time.sleep(wait)
 
     def start_watcher(self):
         if not self.watching:
@@ -179,30 +189,50 @@ class Room:
             self.media.stop()
             self.media.remove(self.host["stream"])
         self.host = None
+        self.host_control_until = None
         self.pending.clear()
         self.recognition = None
         self.history.clear()
         self.stage_since = self.last_audio = None
         for member in self.members.values():
             member.last_pull = None
+            member.progress = None
 
     def expire(self, now):
+        if self.host and self.host_control_until is not None and now >= self.host_control_until:
+            self.leave(self.host["key"], "主持控制连接超时")
         if now < self.lease_grace_until:
             return
         for key, member in list(self.members.items()):
             if now - member.seen > self.lease_s:
+                if self.host and self.host["key"] == key and self.host_in_grace(member, now):
+                    if self.host_control_until is None:
+                        self.host_control_until = max(member.seen + self.lease_s, self.lease_grace_until) + HOST_CONTROL_GRACE_S
+                    continue
                 self.leave(key, "连接超时")
 
-    def touch(self, key, name, agent):
-        now = time.monotonic()
-        self.expire(now)
+    def host_in_grace(self, member, now):
+        if self.host_control_until is not None:
+            return now < self.host_control_until
+        deadline = max(member.seen + self.lease_s, self.lease_grace_until)
+        return (deadline < now < deadline + HOST_CONTROL_GRACE_S and self.last_audio is not None
+                and now - self.last_audio <= FRESH_AUDIO_S)
+
+    def touch(self, key, name, agent, now, *, renew, join):
         if key not in self.members:
+            if not join:
+                raise Problem(409, "请先刷新房间状态")
             if len(self.members) >= CAPACITY:
                 raise Problem(409, "房间已满")
             self.members[key] = Member(name, client_type(agent), now, now)
             self.monitor.event("连接", f"{name} 进入房间")
             self.start_watcher()
-        self.members[key].seen = now
+        member = self.members[key]
+        if renew:
+            member.seen = now
+            if self.host and key == self.host["key"]:
+                self.host_control_until = None
+        return member
 
     def grant(self, key, choice):
         self.reset()
@@ -233,6 +263,19 @@ class Room:
                 "hosting": mine, "pending": key in self.pending,
                 "requests": [{"id": req["id"], "name": req["name"]} for req in self.pending.values()] if mine else [],
                 "members": len(self.members), "livekit": self.media.enabled, "flac": flac.AVAILABLE}
+
+    def control_view(self, key, config, known):
+        # A revision describes this member's authorized view, including host-only requests.
+        member = self.members[key]
+        state = dict(self.status(key), config=config)
+        view = encoded(state)
+        if member.last_view != view:
+            member.last_view = view
+            member.revision += 1
+        cursor = f"{member.peer_id}.{member.revision}"
+        if known == cursor:
+            return {"unchanged": True, "cursor": cursor}
+        return dict(state, cursor=cursor)
 
     def action(self, key, name, action, data):
         if action == "request":
@@ -551,9 +594,16 @@ class App:
                     raise Problem(401, "会话已结束，请重新登录")
             if clock_read:
                 return 200, encoded({"unix_ms": time.time() * 1000}), []
-            room.touch(key, user[0], env.get("HTTP_USER_AGENT", ""))
-            if room_read and room.host and query.get("listen") == [room.host["stream"]]:
-                room.members[key].last_pull = time.monotonic()
+            now = time.monotonic()
+            room.expire(now)
+            media_stream = (data or {}).get("stream") if media_request else query.get("stream", [""])[0]
+            join_for_media = room.host and media_stream == room.host["stream"] and (media_request or method == "GET")
+            member = room.touch(key, user[0], env.get("HTTP_USER_AGENT", ""), now, renew=room_read,
+                                join=room_read or stage_write or join_for_media)
+            if room_read and "want" in query:
+                member.heartbeat(query, room.host)
+            elif room_read and member.want_listen is None and room.host and query.get("listen") == [room.host["stream"]]:
+                member.last_pull = time.monotonic()
             if media_request:
                 host = room.host
                 if path == "/api/diagnostics":
@@ -583,7 +633,12 @@ class App:
                 return 200, encoded(dict(url=room.media.url, token=room.media.token(host["stream"], identity,
                                     publish=publish, subscribe=not publish))), []
             if stage_write:
+                prior_stream = room.host["stream"] if room.host else None
                 room.action(key, user[0], path.split("/")[-1], data)
+                if not room.host or key != room.host["key"] or prior_stream is None or data.get("stream") == prior_stream:
+                    member.seen = time.monotonic()
+                    if room.host and key == room.host["key"]:
+                        room.host_control_until = None
             elif audio_request:
                 host = room.host
                 if not host or query.get("stream", [""])[0] != host["stream"]:
@@ -636,10 +691,11 @@ class App:
                     raise Problem(400, "序号无效")
                 rate = 48000 if host["codec"] == "opus" else host["rate"]
                 item, expired = room.history.read(after, rate, query.get("sync") == ["1"])
-                room.members[key].last_pull = time.monotonic()
                 if not item:
                     room.monitor.empty_reads += 1
                     return 204, b"", []
+                if member.want_listen is None:
+                    member.last_pull = time.monotonic()
                 wire = item[7] if compression == "flac" else item[1]
                 room.monitor.traffic(room.members[key], sent=len(wire))
                 if after >= 0:
@@ -656,7 +712,7 @@ class App:
                     headers.append(("X-Audimate-Served-Ms", str(round(time.time()*1000))))
                 return 200, wire, headers
             config = dict(self.control.active, dev_timing=True) if self.development else self.control.active
-            return 200, encoded(dict(room.status(key), config=config)), []
+            return 200, encoded(room.control_view(key, config, query.get("since", [None])[0] if room_read else None)), []
 
     def __call__(self, env, start_response):
         from http.client import responses

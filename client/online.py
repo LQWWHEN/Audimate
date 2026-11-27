@@ -1,5 +1,6 @@
 """Tk room panel; all HTTP and audio IO run outside the Tk event loop."""
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlencode
 import time
 import json
 import math
@@ -27,13 +28,14 @@ class OnlineRoom:
         w.geometry("670x560")
         w.minsize(600, 510)
         w.protocol("WM_DELETE_WINDOW", self.close)
-        self.pool = ThreadPoolExecutor(max_workers=1)
+        self.pool = ThreadPoolExecutor(max_workers=2)
         self.future = self.api = self.state = self.selection = None
         self.capture = self.upload = self.listener = None
         self.stream = ""
         self.pending = False
-        self.polling = False
-        self.after_poll = None
+        self.poll_future = None
+        self.control_generation = 0
+        self.full_refresh = True
         self.next_poll = 0
         self.name = ""
         self.frame = ttk.Frame(w, padding=20)
@@ -85,6 +87,7 @@ class OnlineRoom:
 
     def submit(self, call, done):
         if self.future is None:
+            self.control_generation += 1
             self.future = self.pool.submit(call)
             self.done = done
 
@@ -174,9 +177,6 @@ class OnlineRoom:
             self.listener = None
 
     def logout(self):
-        if self.polling:
-            self.after_poll = self.logout
-            return
         if self.future:
             return
         self.submit(lambda: self.api.request("logout", {}), self.logged_out)
@@ -189,7 +189,8 @@ class OnlineRoom:
         self.name = self.stream = ""
         self.selection = self.state = None
         self.pending = False
-        self.after_poll = None
+        self.control_generation += 1
+        self.full_refresh = True
         self.fallback_stream = ""
         self.last_sync = self.retry_at = 0
         if self.picker:
@@ -247,10 +248,7 @@ class OnlineRoom:
         def send():
             if self.state and self.state["hosting"] and self.state["host"]["stream"] == stream:
                 self.submit(lambda: self.api.request("stage/sync", {"stream": stream, "sync_request_ms": value}), self.render)
-        if self.polling:
-            self.after_poll = send
-        else:
-            send()
+        send()
 
     def toggle_listen(self):
         self.sync_stream = None
@@ -261,13 +259,10 @@ class OnlineRoom:
         self.render(self.state)
 
     def toggle_stage(self):
-        if not self.state or (self.future and not self.polling):
+        if not self.state or self.future:
             return
         if self.state["pending"] or self.state["hosting"]:
-            if self.polling:
-                self.after_poll = self.release
-            else:
-                self.release()
+            self.release()
             return
         if not self.picker:
             self.picker = HostSetup(self.window, self.request_stage, self.show_room)
@@ -279,16 +274,11 @@ class OnlineRoom:
         self.picker.pack(fill="both", expand=True)
 
     def show_room(self):
-        if self.after_poll == self.request_stage:
-            self.after_poll = None
         self.picker.pack_forget()
         self.frame.pack(fill="both", expand=True)
 
     def request_stage(self):
         if not self.picker or not self.picker.winfo_manager():
-            return
-        if self.polling:
-            self.after_poll = self.request_stage
             return
         if self.future or not self.state or self.pending or self.state["hosting"]:
             return
@@ -339,25 +329,44 @@ class OnlineRoom:
         self.submit(lambda: self.api.request("stage/leave", data), released)
 
     def decide(self, action, applicant):
-        if self.polling:
-            self.after_poll = lambda: self.decide(action, applicant)
-            return
         data = {"id": applicant, "stream": self.stream}
         self.submit(lambda: self.api.request("stage/" + action, data), self.render)
 
-    def poll_host(self, host, source):
+    def poll_host(self, api, route, host, source):
         track = current_track(source)
         if track != host["track"]:
             try:
-                return self.api.request("stage/track", {"stream": host["stream"], "track": track})
+                return api.request("stage/track", {"stream": host["stream"], "track": track})
             except RoomError as exc:
                 if exc.status not in (403, 409):
                     raise
                 # A handoff took place since the last poll.
-        return self.api.request("room")
+        return api.request(route)
+
+    def start_poll(self):
+        api = self.api
+        params = {"want": int(self.want_listen)}
+        if self.state and self.state.get("cursor") and not self.full_refresh:
+            params["since"] = self.state["cursor"]
+        if self.listener and getattr(self.listener, "position", 0):
+            params.update(stream=self.listener.host["stream"], position=self.listener.position,
+                          transport="rtc" if isinstance(self.listener, RTCWorker) else "pcm")
+        route = "room?" + urlencode(params)
+        self.poll_generation = self.control_generation
+        self.next_poll = time.monotonic() + .8
+        host = self.state and self.state["host"]
+        if self.capture and self.capture.ready.is_set() and self.selection and host and self.stream == host["stream"]:
+            self.poll_future = self.pool.submit(self.poll_host, api, route, host, self.selection.source)
+        else:
+            self.poll_future = self.pool.submit(api.request, route)
 
     def render(self, state):
         previous = self.state
+        if previous and previous.get("cursor") and state.get("cursor"):
+            epoch, rev = state["cursor"].split(".")
+            prior, old = previous["cursor"].split(".")
+            if epoch == prior and int(rev) < int(old):
+                return
         if self.state is None:
             self.status.set("")
         self.state = state
@@ -451,20 +460,33 @@ class OnlineRoom:
                 ttk.Button(row, text=title, command=lambda a=action, i=req["id"]: self.decide(a, i)).pack(side="right")
 
     def tick(self):
+        # Album artwork may complete after the last changed room snapshot.
+        if self.state and self.cover.pending and self.cover.pending.done():
+            self.cover.show(self.cover.url)
+        if self.poll_future and self.poll_future.done():
+            poll, self.poll_future = self.poll_future, None
+            if self.poll_generation == self.control_generation and self.name:
+                try:
+                    update = poll.result()
+                    self.full_refresh = False
+                    if not update.get("unchanged"):
+                        self.render(update)
+                    elif self.state and self.want_listen and not self.listener and self.state["host"]:
+                        self.render(self.state)
+                except Exception as exc:
+                    self.full_refresh = True
+                    if isinstance(exc, RoomError) and exc.status == 401:
+                        self.logged_out(None)
+                    self.status.set(str(exc))
         if self.future and self.future.done():
             result, self.future = self.future, None
-            self.polling = False
             try:
                 self.done(result.result())
             except Exception as exc:
+                self.full_refresh = True
                 if isinstance(exc, RoomError) and exc.status == 401 and self.name:
                     self.logged_out(None)
                 self.status.set(str(exc))
-            self.next_poll = time.monotonic() + 1 if self.state else 0
-            if self.after_poll:
-                action, self.after_poll = self.after_poll, None
-                if self.name:
-                    action()
         if self.capture:
             levels = [f"{20 * math.log10(value):.1f}" if value > 0 else "−∞" for value in self.capture.levels]
             self.levels.configure(text=f"输入电平　左 {levels[0]} dBFS　右 {levels[1]} dBFS" if self.capture.ready.is_set() else "正在打开音源…")
@@ -486,18 +508,11 @@ class OnlineRoom:
                 self.upload.notice = ""
             elif self.listener and self.listener.lag is not None:
                 self.check_listening_delay(self.listener.lag)
-            if not self.future and time.monotonic() >= self.next_poll:
+            if not self.future and not self.poll_future and time.monotonic() >= self.next_poll:
                 if self.state and self.state["hosting"] and not self.selection:
                     self.release()
                 else:
-                    self.polling = True
-                    host = self.state and self.state["host"]
-                    if self.capture and self.capture.ready.is_set() and host and "track" in host:
-                        source = self.selection.source
-                        self.submit(lambda: self.poll_host(host, source), self.render)
-                    else:
-                        route = "room?listen="+self.listener.host["stream"] if self.listener and getattr(self.listener,"subscribed",False) else "room"
-                        self.submit(lambda: self.api.request(route), self.render)
+                    self.start_poll()
         self.tick_id = self.window.after(80, self.tick)
 
     def close(self):

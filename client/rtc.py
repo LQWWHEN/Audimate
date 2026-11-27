@@ -134,6 +134,7 @@ class RTCWorker(threading.Thread):
                             if "detail" in metrics and any(f.name == "concealed_samples" for f, _ in row.ListFields()):
                                 metrics["detail"]["concealed_samples"] = row.concealed_samples
                             metrics["bytes"] = row.bytes_received
+                            self.position = row.bytes_received
                             stamp = row.estimated_playout_timestamp
                             if stamp > 3e12:
                                 stamp -= 2208988800000
