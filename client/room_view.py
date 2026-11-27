@@ -137,6 +137,7 @@ class RoomView(QObject):
                     artist=track.get("artist",""), album="  /  ".join(str(x) for x in
                     (current.get("album"), current.get("released")) if x),
                     candidate=" — ".join(filter(None,(candidate.get("title"),candidate.get("artist")))),
+                    recognitionEnabled=bool(h.get("recognize")),
                     notice=self.notice or self.control_error, recognitionNotice=info.get("notice") or "",
                     shared=quality(h) if h else "等待音源", received=receiving,
                     delay=round(lag_ms) if lag_ms is not None and lag_ms>1000 else 0,

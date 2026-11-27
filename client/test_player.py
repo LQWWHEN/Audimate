@@ -14,6 +14,7 @@ import numpy as np
 from PySide6.QtCore import QObject, QMetaObject, QCoreApplication, QEvent, Qt
 from PySide6.QtTest import QTest
 from PySide6.QtGui import QGuiApplication
+from PySide6.QtQml import QQmlExpression, qmlContext
 from PySide6.QtQuickControls2 import QQuickStyle
 
 from host.capture.test_isolation import start_process, write_tone
@@ -78,6 +79,70 @@ class AnalysisTests(unittest.TestCase):
 
 
 class RoomTests(unittest.TestCase):
+    def test_track_refresh_fits_text_without_moving_the_player(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        QQuickStyle.setStyle("Material")
+        app = QGuiApplication.instance() or QGuiApplication([])
+        model = RoomView(DEFAULT_DLL)
+        model.clock.stop()
+        model.user, model.want = "Léa", False
+        host = dict(name="夜航电台", stream="a", recognize=True, rate=48000, bits=16)
+        engine, window = build_window(model)
+        try:
+            frames = [window.findChild(QObject, name) for name in
+                      ("record", "hostRail", "audioRail", "presetButton", "songInfo",
+                       "songTitle", "songArtist", "songAlbum")]
+            title, artist, album = frames[-3:]
+            font_size = QQmlExpression(qmlContext(title), title, "fontInfo.pixelSize")
+            short = dict(title="潮汐之间", artist="Léa", album="海岸线习作")
+            long = dict(title="海岸线上的月光与潮汐"*5 + "（東京 · Live Session）",
+                        artist="김민서 / Léa " * 16, album="現場錄音 " * 30)
+            extreme = dict(long, title="MidnightSessions" * 25)
+            pending = dict(candidate=dict(title=long["title"], artist="林澈"), notice="正在核对识别结果")
+            for portrait, width, height in ((False,1140,760), (False,960,560), (True,420,600), (True,480,740)):
+                model.apply(dict(host=host))
+                window.setProperty("portrait", portrait)
+                QTest.qWait(40)
+                window.resize(width, height)
+                QTest.qWait(40)
+                reference = None
+                for info in ({}, pending, dict(current=short), dict(current=long),
+                             dict(current=extreme), dict(current=short), {}):
+                    track = info.get("current", {})
+                    with self.subTest(size=(width,height), title=track.get("title","等待")):
+                        model.apply(dict(host=dict(host, recognition=info)))
+                        QTest.qWait(35)
+                        self.assertEqual((window.width(), window.height()), (width, height))
+                        geometry = [(i.x(), i.y(), i.width(), i.height()) for i in frames]
+                        if reference is None:
+                            reference = geometry, window.minimumHeight()
+                        self.assertEqual((geometry, window.minimumHeight()), reference)
+                        self.assertEqual(title.property("text"), track.get("title","正在识别"))
+                        self.assertEqual(artist.property("text"), track.get("artist",""))
+                        self.assertEqual(album.property("text"), track.get("album",""))
+                        self.assertLessEqual(title.property("lineCount"), 2)
+                        for line in (title, artist, album):
+                            self.assertLessEqual(line.property("contentHeight"), line.height()+1)
+                            self.assertLessEqual(line.property("contentWidth"), line.width()+1)
+                        size, error = font_size.evaluate()
+                        self.assertFalse(error)
+                        if track is extreme:
+                            self.assertEqual(size, title.property("minimumPixelSize"))
+                            self.assertTrue(title.property("truncated"))
+                            full_name = QQmlExpression(qmlContext(title), title, "ToolTip.text")
+                            self.assertEqual(full_name.evaluate(), (extreme["title"], False))
+                        elif track is long:
+                            self.assertLess(size, 22)
+                            self.assertFalse(title.property("truncated"))
+                            self.assertTrue(artist.property("truncated") and album.property("truncated"))
+                        else:
+                            self.assertEqual(size, 28 if portrait else 38)
+                            self.assertFalse(title.property("truncated"))
+        finally:
+            model.close()
+            engine.deleteLater()
+            QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
+
     def test_metadata_clearance_with_both_rails_populated(self):
         os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
         QQuickStyle.setStyle("Material")

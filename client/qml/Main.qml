@@ -29,6 +29,12 @@ ApplicationWindow {
     readonly property int railLabelSize: portrait ? 16 : 17
     readonly property int railValueSize: portrait ? 20 : 22
     readonly property int valueGap: portrait ? 5 : 8
+    component SongLine: Word {
+        width: parent.width
+        horizontalAlignment: Text.AlignHCenter
+        textFormat: Text.PlainText
+        fontSizeMode: Text.Fit
+    }
     component RailReading: Column {
         required property string caption
         required property string value
@@ -99,22 +105,55 @@ ApplicationWindow {
                 y: localPage.showDisc ? (parent.height-height)/2 : v.entered ? Math.max(0,(field.centerHeight-height-song.height)/2)
                              : win.portrait ? Math.max(0,(field.height-height-login.height)/2) : (field.height-height-45)*.46
             }
+            Word {
+                visible: !v.entered && !win.portrait
+                x: field.width*.285 - width/2
+                y: disc.y + disc.height - 8
+                font.pixelSize: 45; font.weight: Font.DemiBold; font.letterSpacing: -1
+                text: "Audimate"
+            }
             Column {
-                id: song; objectName: "songInfo"; spacing: 4
-                width: v.entered ? (!win.portrait ? field.width-2*field.leftRailEnd-24 : field.width-40) : (win.portrait?field.width-40:field.width*.49)
-                x: (v.entered || win.portrait ? field.width*.5 : field.width*.285) - width/2
+                id: song; objectName: "songInfo"
+                visible: v.entered
+                width: win.portrait ? field.width-40 : field.width-2*field.leftRailEnd-24
+                anchors.horizontalCenter: parent.horizontalCenter
                 y: disc.y+disc.height-8
-                visible: v.entered || !win.portrait
-                Word {
-                    width: parent.width; horizontalAlignment: Text.AlignHCenter
-                    font.pixelSize: win.portrait ? 32 : 45; font.weight: Font.DemiBold; font.letterSpacing: -1
-                    text: v.entered ? v.title : "Audimate"
+                spacing: 2
+                SongLine {
+                    id: trackTitle; objectName: "songTitle"
+                    height: win.portrait ? 60 : 80
+                    font.pixelSize: titleMeasure.fontInfo.pixelSize; minimumPixelSize: titleMeasure.minimumPixelSize
+                    font.weight: titleMeasure.font.weight; font.letterSpacing: titleMeasure.font.letterSpacing
+                    verticalAlignment: Text.AlignBottom
                     maximumLineCount: 2; wrapMode: Text.Wrap
+                    text: v.title
+                    Text {
+                        id: titleMeasure
+                        visible: false
+                        // Measure two full lines without elision. The visible title
+                        // then fits natural line spacing inside the reserved height.
+                        width: trackTitle.width; height: 2 * lineHeight
+                        lineHeightMode: Text.FixedHeight; lineHeight: trackTitle.height
+                        font.family: uiFont.family; font.weight: Font.DemiBold; font.letterSpacing: -0.5
+                        font.pixelSize: win.portrait ? 28 : 38; minimumPixelSize: 12
+                        text: trackTitle.text; textFormat: Text.PlainText; renderType: Text.NativeRendering
+                        fontSizeMode: Text.Fit; wrapMode: Text.Wrap; maximumLineCount: 3
+                    }
                 }
-                Word { width: parent.width; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 19; color: "#d1d0e1"
-                    visible: text.length>0; text: v.entered ? v.artist : "" }
-                Word { width: parent.width; horizontalAlignment: Text.AlignHCenter; font.pixelSize: 15; color: muted
-                    visible: text.length>0; text: v.entered ? v.album : "" }
+                SongLine {
+                    objectName: "songArtist"
+                    height: win.portrait ? 26 : 28
+                    font.pixelSize: win.portrait ? 17 : 19; minimumPixelSize: 14
+                    maximumLineCount: 1
+                    color: "#d1d0e1"; text: v.artist
+                }
+                SongLine {
+                    objectName: "songAlbum"
+                    height: 22
+                    font.pixelSize: 15; minimumPixelSize: 13
+                    maximumLineCount: 1
+                    color: win.muted; text: v.album
+                }
             }
 
             ColumnLayout {
@@ -194,12 +233,35 @@ ApplicationWindow {
                         }
                     }
                     Item { visible: win.portrait && presets.visible; height: presets.implicitHeight; width: 1 }
-                    Column {
-                        width: parent.width; spacing: win.valueGap; topPadding: win.portrait ? 2 : 8
-                        visible: !!v.candidate || !!v.recognitionNotice
-                        Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!v.candidate; text: "耳朵一动"; color: "#d6c4ea"; font.pixelSize: win.railLabelSize }
-                        Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!text; text: v.candidate; font.pixelSize: win.railValueSize-1; maximumLineCount: 2; wrapMode: Text.Wrap }
-                        Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!text; text: v.recognitionNotice; font.pixelSize: win.railLabelSize; maximumLineCount: win.portrait && v.candidate ? 1 : 2; wrapMode: Text.Wrap; color: secondary }
+                    Item {
+                        id: recognitionSlot
+                        visible: v.recognitionEnabled || !!v.candidate || !!v.recognitionNotice
+                        readonly property int lineSpace: win.portrait ? 25 : 32
+                        readonly property real bodyTop: win.portrait ? 0 : earLabel.height + win.valueGap
+                        width: parent.width
+                        height: bodyTop + 2 * lineSpace
+                        Word {
+                            id: earLabel
+                            width: parent.width; horizontalAlignment: Text.AlignRight
+                            visible: !win.portrait && !!v.candidate; text: "耳朵一动"; color: "#d6c4ea"; font.pixelSize: win.railLabelSize
+                        }
+                        Word {
+                            width: parent.width; horizontalAlignment: Text.AlignRight
+                            y: recognitionSlot.bodyTop
+                            height: (v.recognitionNotice ? 1 : 2) * recognitionSlot.lineSpace
+                            verticalAlignment: Text.AlignTop; font.pixelSize: win.portrait ? 17 : win.railValueSize-1
+                            maximumLineCount: v.recognitionNotice ? 1 : 2; wrapMode: Text.Wrap
+                            textFormat: Text.PlainText
+                            text: win.portrait && v.candidate ? "耳朵一动 · " + v.candidate : v.candidate
+                        }
+                        Word {
+                            width: parent.width; horizontalAlignment: Text.AlignRight
+                            y: v.candidate ? parent.height-recognitionSlot.lineSpace : 0
+                            height: parent.height-y; verticalAlignment: Text.AlignTop
+                            font.pixelSize: win.railLabelSize; color: secondary
+                            maximumLineCount: v.candidate ? 1 : 2; wrapMode: Text.Wrap
+                            textFormat: Text.PlainText; text: v.recognitionNotice
+                        }
                     }
                 }
             }
