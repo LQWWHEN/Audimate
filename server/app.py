@@ -17,13 +17,13 @@ from urllib.parse import parse_qs, urlsplit
 if __package__:
     from . import flac, recognition
     from .monitor import Member, Monitor, client_type
-    from .control import DEFAULT, Control, Problem, sync_ms
+    from .control import DEFAULT, FUZZY_FIELDS, Control, Problem, sync_ms
     from .media import Media, History
 else:  # Gunicorn imports app:create_app() from the deployment directory.
     import flac
     import recognition
     from monitor import Member, Monitor, client_type
-    from control import DEFAULT, Control, Problem, sync_ms
+    from control import DEFAULT, FUZZY_FIELDS, Control, Problem, sync_ms
     from media import Media, History
 
 WEB = Path(__file__).with_name("web")
@@ -98,6 +98,8 @@ class Room:
         self.lease_grace_until = 0
 
     def apply_limits(self, config, overrides):
+        if self.recognition and self.recognition.title and any(config[k] != self.policy[k] for k in FUZZY_FIELDS):
+            self.recognition.candidate = None
         self.policy = config.copy()
         self.overrides = overrides.copy()
         self.history.seconds = config["history_s"]

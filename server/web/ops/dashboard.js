@@ -297,6 +297,9 @@ function renderControl(s) {
     byId("history").value=pending.history_s; byId("intervals").value=pending.intervals.join(", ");
     byId("lease").value=pending.lease_s;
     byId("recognitionInterval").value=active.recognition_interval_s;
+    byId("recognitionFuzzy").value=active.recognition_fuzzy ? "on" : "off";
+    byId("titleMin").value=active.recognition_title_min;
+    byId("artistMin").value=active.recognition_artist_min;
     byId("budget").value=active.history_mib; byId("blockLimit").value=active.history_blocks;
     byId("defaultSync").value=active.sync_default_ms/1000; byId("globalCap").value=active.sync_max_ms/1000;
     byId("roomDefault").value=overrides.sync_default_ms == null ? "" : overrides.sync_default_ms/1000;
@@ -341,6 +344,9 @@ byId("config").onsubmit = e => {
                      sync_max_ms: byId("roomCap").value === "" ? null : Math.round(byId("roomCap").valueAsNumber*1000)},
     history_s: Number(byId("history").value),
     recognition_interval_s: byId("recognitionInterval").valueAsNumber,
+    recognition_fuzzy: byId("recognitionFuzzy").value==="on",
+    recognition_title_min: byId("titleMin").valueAsNumber,
+    recognition_artist_min: byId("artistMin").valueAsNumber,
     intervals: byId("intervals").value.split(/[,，]/).map(Number),
     lease_s: Number(byId("lease").value),
   });

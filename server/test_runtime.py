@@ -203,6 +203,20 @@ class Runtime(unittest.TestCase):
         self.assertEqual({k: restored.control.active[k] for k in active}, active)
         self.assertEqual({k: restored.control.pending[k] for k in pending}, pending)
         self.assertEqual((restored.room.lease_s, restored.room.history.seconds), (20, 7))
+        self.assertTrue(restored.room.policy["recognition_fuzzy"])
+        self.assertEqual(restored.room.policy["recognition_title_min"], 0.90)
+        self.assertEqual(restored.room.policy["recognition_artist_min"], 0.85)
+
+    def test_fuzzy_policy_validation_and_persistence(self):
+        secret = manage(self.db, "create", "operator")
+        self.ops("login", dict(name="operator", password=secret))
+        for invalid in (dict(recognition_fuzzy=1), dict(recognition_title_min=0),
+                        dict(recognition_artist_min=True), dict(recognition_artist_min=1.01)):
+            self.assertEqual(self.ops("service/configure", invalid)[0], 400)
+        values = dict(recognition_fuzzy=False, recognition_title_min=0.95, recognition_artist_min=0.89)
+        self.assertEqual(self.ops("service/configure", values)[0], 200)
+        for policy in (self.app.room.policy, App(self.db).control.active):
+            self.assertEqual({k:policy[k] for k in values}, values)
 
     def test_waiting_member_expires_without_room_requests(self):
         self.alice.request("register", dict(name="listener", password="local-test-password"))

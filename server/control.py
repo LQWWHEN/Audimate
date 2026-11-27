@@ -13,7 +13,8 @@ class Problem(Exception):
 
 DEFAULT = {"history_s": 15, "recognition_interval_s": 10, "intervals": [5, 10, 30], "logging": "debug", "lease_s": 20,
            "history_mib": 64, "history_blocks": 3000, "sync_default_ms": 1200, "sync_max_ms": 1800,
-           "version": 1}
+           "recognition_fuzzy": True, "recognition_title_min": 0.90, "recognition_artist_min": 0.85, "version": 1}
+FUZZY_FIELDS = ("recognition_fuzzy", "recognition_title_min", "recognition_artist_min")
 SYNC_FIELDS = ("sync_default_ms", "sync_max_ms")
 
 
@@ -55,6 +56,15 @@ class Control:
         if data.get("room_id", room.room_id) != room.room_id:
             raise Problem(404, "房间不存在")
         config = self.active.copy()
+        enabled = data.get("recognition_fuzzy", config["recognition_fuzzy"])
+        if type(enabled) is not bool:
+            raise Problem(400, "模糊兜底开关需要布尔值")
+        config["recognition_fuzzy"] = enabled
+        for key in ("recognition_title_min", "recognition_artist_min"):
+            value = data.get(key, config[key])
+            if type(value) not in (float, int) or not 0 < value <= 1:
+                raise Problem(400, "识别相似度门槛须大于 0 且不超过 1")
+            config[key] = value
         for key, low, high in (("history_s", 1, 30), ("lease_s", 5, 300),
                                ("recognition_interval_s", 1, 300),
                                ("history_mib", 2, 1024), ("history_blocks", 1, 30000)):

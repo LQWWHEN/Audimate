@@ -34,6 +34,105 @@ class RecognitionTests(unittest.TestCase):
     def status(self):
         return self.room.status("listener")["host"]
 
+    def player(self, title, artist):
+        self.room.action("k", "Alice", "track", dict(stream=self.stream, track=dict(title=title, artist=artist)))
+        return self.room.recognition
+
+    def replay(self, provider, quick=False):
+        reply = AsyncMock(side_effect=provider) if isinstance(provider, Exception) else AsyncMock(return_value=provider)
+        with patch.object(recognition, "identify", reply):
+            self.room.recognition.run(self.room, [], 8000, 2, quick)
+        return self.room.monitor.events[0]
+
+    def test_quick_corroborated_collaboration(self):
+        player = "Digital (Spencer Sotelo)"
+        self.player(player, "PhaseOne/Periphery")
+        track = dict(id="123", title="Digital (feat. Periphery) (Spencer Sotelo)",
+                     artist="Periphery & PhaseOne", album="Album", cover="https://example.test/cover")
+        event = self.replay(track, True)
+        self.assertIn("合作署名一致", event["detail"])
+        self.assertIn("已确认", event["detail"])
+        self.assertEqual(self.status()["source"], player+" - PhaseOne/Periphery")
+        self.assertEqual(self.status()["recognition"]["current"], track)
+        self.player("Digital (Someone Else)", "PhaseOne/Periphery")
+        self.assertNotIn("已确认", self.replay(track, True)["detail"])
+
+    def test_fuzzy_streak_requires_two_fresh_full_hits(self):
+        state = self.player("Digital (Spensr Sotelo)", "PhaseOne/Periphery")
+        track = dict(id="123", title="Digital (feat. Periphery) (Spencer Sotelo)", artist="Periphery & PhaseOne")
+        self.assertIn("0/2", self.replay(track, True)["detail"])
+        self.assertIsNone(state.candidate)
+        self.assertIn("1/2", self.replay(track)["detail"])
+        self.replay(TimeoutError())
+        self.assertIsNone(state.candidate)
+        self.assertIn("1/2", self.replay(track)["detail"])
+        self.assertIn("1/2", self.replay(dict(track, id="456"))["detail"])
+        self.replay(None)
+        self.assertIsNone(state.candidate)
+        self.assertIn("1/2", self.replay(track)["detail"])
+        event = self.replay(track)
+        for text in ("2/2", "模糊兜底采用", "歌名 0.", "艺人 1.000"):
+            self.assertIn(text, event["detail"])
+        self.assertEqual(self.status()["recognition"]["current"], track)
+        self.assertEqual(self.status()["source"], "Digital (Spensr Sotelo) - PhaseOne/Periphery")
+        self.player("Digital (Spencor Sotelo)", "PhaseOne/Periphery")
+        self.assertIn("1/2", self.replay(track)["detail"])
+        self.assertIsNone(self.status()["recognition"]["current"])
+
+    def test_partial_creds_and_fuzzy_guards(self):
+        state = self.player("Long Artist Collaboration", "Alice")
+        track = dict(id="1", title="Long Artist Collaboration (ft. Bob)", artist="Alice")
+        self.assertIn("0/2", self.replay(track, True)["detail"])
+        self.assertIn("1/2", self.replay(track)["detail"])
+        self.assertIn("2/2", self.replay(track)["detail"])
+        self.assertEqual(state.current, track)
+        for captured, returned, artist, source_artist in (
+            ("One", "On", "Singer", "Singer"), ("爱", "爱你", "Singer", "Singer"),
+            ("One (Spencer Sotelo)", "On (Spencer Sotelo)", "Singer", "Singer"),
+            ("A very long song title (Live)", "A very long song title (Remix)", "Singer", "Singer"),
+            ("A very long song title", "A very long song title - Acoustic", "Singer", "Singer"),
+            ("A very long song title (1990 Remaster)", "A very long song title (2014 Remaster)", "Singer", "Singer"),
+            ("Thunderstruck", "Thunderstruck", "AC/DC", "AC"),
+            ("Thunderstruck", "Thunderstruck", "AC/DC", "AC & DC"),
+            ("Same Long Title", "Same Long Title", "Singer", "Unrelated"),
+        ):
+            with self.subTest(captured=captured, returned=returned, artist=artist):
+                state = self.player(captured, artist)
+                for _ in range(2):
+                    self.replay(dict(id="x", title=returned, artist=source_artist))
+                self.assertIsNone(state.current)
+                self.assertIsNone(state.candidate)
+
+    def test_fuzzy_policy_live_and_strong_rules_take_precedence(self):
+        track = dict(id="1", title="Long Melody Title", artist="John Singer")
+        state = self.player("Long Melodi Title", "Jon Singer")
+        self.assertIn("1/2", self.replay(track)["detail"])
+        for changes in (dict(recognition_artist_min=1.0), dict(recognition_title_min=1.0), dict(recognition_fuzzy=False)):
+            self.room.apply_limits(dict(DEFAULT, **changes), {})
+            self.assertIsNone(state.candidate)
+            self.assertNotIn("1/2", self.replay(track)["detail"])
+        self.room.apply_limits(DEFAULT, {})
+        self.assertIn("1/2", self.replay(track)["detail"])
+        self.assertIn("2/2", self.replay(track)["detail"])
+        self.player(track["title"], track["artist"])
+        with patch.object(recognition.Credits, "fallback", side_effect=AssertionError("unexpected scoring")):
+            self.assertIn("已确认", self.replay(track, True)["detail"])
+
+    def test_scheduled_fuzzy_windows_use_new_audio(self):
+        self.room.apply_limits(dict(DEFAULT, recognition_interval_s=1), {})
+        state = self.player("I Will Surviva", "Gloria Gaynor")
+        track = dict(id="482734446", title="I Will Survive", artist="Gloria Gaynor")
+        ends = []
+        for second in range(1, 24):
+            with patch("server.recognition.threading.Thread") as worker, patch("time.monotonic", return_value=200+second):
+                self.room.append_audio(bytes(8000*4), 8000, 2)
+            if worker.called:
+                args = worker.call_args.kwargs["args"]
+                with patch.object(recognition, "identify", AsyncMock(return_value=track)):
+                    state.run(*args)
+                ends.append((second, args[-1], state.current is not None))
+        self.assertEqual(ends, [(5, True, False), (12, False, False), (22, False, True)])
+
     def test_candidate_timeout_no_match_and_third_song(self):
         state = self.room.recognition
         state.receive(song("A"), False)
@@ -125,6 +224,14 @@ class RecognitionTests(unittest.TestCase):
         self.assertEqual(self.status()["recognition"]["current"], track)
         self.assertIn("复用目录核对", self.room.monitor.events[0]["detail"])
         self.assertIn("Morphine - Sheena Ringo", self.room.monitor.events[0]["message"])
+
+    def test_localized_live_credit_precedes_fuzzy_scoring(self):
+        state = self.player("モルヒネ (ライブ)", "椎名林檎")
+        track = dict(id="123", title="Morphine (Live)", artist="Sheena Ringo")
+        with patch.object(recognition, "localized_names", AsyncMock(return_value=state.title)), patch.object(
+                recognition.Credits, "fallback", side_effect=AssertionError("unexpected scoring")):
+            self.assertIn("已确认", self.replay(track, True)["detail"])
+        self.assertEqual(state.current, track)
 
     def test_chinese_catalog_fallback_and_artist_check(self):
         track = dict(id="100", title="English Title", artist="English Artist")

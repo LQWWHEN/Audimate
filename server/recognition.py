@@ -8,9 +8,15 @@ from pathlib import Path
 import re
 import threading
 import time
-import unicodedata
 from urllib.parse import urlsplit
 import wave
+
+if __package__:
+    from .control import DEFAULT, FUZZY_FIELDS
+    from .song_matching import Credits, normalize, split_suffix
+else:
+    from control import DEFAULT, FUZZY_FIELDS
+    from song_matching import Credits, normalize, split_suffix
 
 WINDOW_S = 12
 QUICK_S = 5
@@ -20,10 +26,6 @@ AVAILABLE = find_spec("shazamio") is not None
 
 _KANA = re.compile(r"[\u3041-\u3096\u30a1-\u30fa]")
 _HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\U00020000-\U0002fa1f]")
-
-
-def normalize(text):
-    return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
 class SuffixFile:
@@ -65,22 +67,29 @@ def song_title_match(left, right, suffixes=None):
     if suffixes is None:
         suffixes = SUFFIX_FILE.read()
 
-    def split_suffix(text):
-        suffix = suffixes.search(text)
-        if not suffix:
-            return text, None
-        return text[:suffix.start()].rstrip(), re.search(r"[0-9]{4}", suffix[0])
-    left_name, left_year = split_suffix(left)
-    right_name, right_year = split_suffix(right)
-    if left_name and left_name == right_name and not (left_year and right_year and left_year[0] != right_year[0]):
+    left_name, left_year = split_suffix(left, suffixes)
+    right_name, right_year = split_suffix(right, suffixes)
+    if left_name and left_name == right_name and not (left_year and right_year and left_year != right_year):
         return "suffix"
     return ""
 
 
-def title_agreement(track, title, suffixes=None):
-    if normalize(track["artist"]) != normalize(title["artist"]):
-        return ""
-    return song_title_match(track["title"], title["title"], suffixes)
+def exact_names(track, title):
+    return all(normalize(track[k]) == normalize(title[k]) for k in ("title", "artist"))
+
+
+def title_agreement(track, title, suffixes=None, credits=None):
+    if credits is None and exact_names(track, title):
+        return "exact"
+    suffixes = suffixes if suffixes is not None else SUFFIX_FILE.read()
+    credits = credits or Credits.compare(track, title, suffixes)
+    if credits.strong():
+        if normalize(track["artist"]) == normalize(title["artist"]):
+            reason = song_title_match(track["title"], title["title"], suffixes)
+            if reason:
+                return reason
+        return "credits"
+    return ""
 
 
 def catalog_locales(title, match):
@@ -106,9 +115,9 @@ async def localized_names(key, language, country):
 
 
 async def check_catalog(track, player, locales, deadline, suffixes):
-    artist = normalize(player["artist"])
-    artist_ok = normalize(track["artist"]) == artist
-    title_ok = bool(song_title_match(track["title"], player["title"], suffixes))
+    original = Credits.compare(track, player, suffixes)
+    artist_ok = original.left_artists == original.right_artists
+    title_ok = not original.conflict and original.left_title == original.right_title
     problem = None
     for index, (language, country) in enumerate(locales):
         # Reserve time for another storefront when the first one is slow or unavailable.
@@ -120,8 +129,11 @@ async def check_catalog(track, player, locales, deadline, suffixes):
             continue
         if not alias:
             continue
-        artist_ok = artist_ok or normalize(alias["artist"]) == artist
-        title_ok = title_ok or bool(song_title_match(alias["title"], player["title"], suffixes))
+        credits = Credits.compare(alias, player, suffixes)
+        if credits.conflict:
+            continue
+        artist_ok = artist_ok or credits.left_artists == credits.right_artists
+        title_ok = title_ok or (credits.left_title and credits.left_title == credits.right_title)
         if artist_ok and title_ok:
             return "localized", "同一 Shazam ID 的本地化曲名与歌手吻合", 120
     if problem:
@@ -240,7 +252,7 @@ class Recognition:
             if not agreement:
                 match = None
         if quick:
-            if match:
+            if match and agreement not in ("partial", "fuzzy"):
                 self.current = match
             return
         if match and self.current and match["id"] == self.current["id"]:
@@ -252,30 +264,43 @@ class Recognition:
                 self.current = None
             self.candidate = match
 
-    async def query(self, wav, trace):
+    async def query(self, wav, trace, policy=None):
         deadline = time.monotonic() + QUERY_TIMEOUT_S
         match = await identify(wav, trace)
         if not match or not self.title:
             return match, "", ""
+        if exact_names(match, self.title):
+            return match, "exact", ""
         suffixes = SUFFIX_FILE.read()
-        agreement = title_agreement(match, self.title, suffixes)
+        credits = Credits.compare(match, self.title, suffixes)
+        if credits.conflict:
+            return match, "", "录音版本冲突"
+        agreement = title_agreement(match, self.title, suffixes, credits)
         if agreement:
-            return match, agreement, "配置的曲名后缀等价" if agreement == "suffix" else ""
+            notes = {"suffix": "配置的曲名后缀等价", "credits": "合作署名一致"}
+            return match, agreement, notes.get(agreement, "")
+        agreement, catalog_note = await self.catalog_agreement(match, suffixes, deadline)
+        if agreement:
+            return match, agreement, catalog_note
+        agreement, note = credits.fallback(policy if policy is not None else DEFAULT)
+        return match, agreement, " · ".join(filter(None, (catalog_note, note)))
+
+    async def catalog_agreement(self, match, suffixes, deadline):
         locales = catalog_locales(self.title, match)
         key = match["id"]
         if not locales or not re.fullmatch(r"[0-9]{1,20}", key):
-            return match, "", ""
+            return "", ""
         if self.last_catalog:
             prior, prior_suffixes, expires, reason, note = self.last_catalog
             if prior == key and prior_suffixes == suffixes and expires > time.monotonic():
-                return match, reason, note + " · 复用目录核对"
+                return reason, note + " · 复用目录核对"
 
         # Only one worker uses this Recognition. Its cache expires with the player title.
         # The optional catalog check shares the original deadline and never discards a fingerprint hit.
         start = time.monotonic()
         reason, note, ttl = await check_catalog(match, self.title, locales, min(start + CATALOG_TIMEOUT_S, deadline), suffixes)
         self.last_catalog = (key, suffixes, time.monotonic()+ttl, reason, note)
-        return match, reason, f"{note} · 目录核对 {round((time.monotonic()-start)*1000)} ms"
+        return reason, f"{note} · 目录核对 {round((time.monotonic()-start)*1000)} ms"
 
     def schedule(self, room, rate, width):
         # Called under the room lock, once per appended block. No PCM copies or IO here.
@@ -316,13 +341,14 @@ class Recognition:
                 room.recognition_busy = False
                 return
             monitor = room.monitor
+            policy = room.policy
             trace = QueryTrace() if monitor.development and monitor.level != "off" else None
         started = time.monotonic()
         note = error = ""
         match = None
         agreement = evidence = ""
         try:
-            match, agreement, evidence = asyncio.run(self.query(encode_window(parts, rate, width, quick), trace))
+            match, agreement, evidence = asyncio.run(self.query(encode_window(parts, rate, width, quick), trace, policy))
             outcome = "命中" if match else "未匹配"
         except asyncio.TimeoutError as exc:
             outcome, note = "超时", "识别超时，稍后重试"
@@ -337,8 +363,12 @@ class Recognition:
             room.recognition_busy = False
             if room.recognition is not self:
                 return
+            if agreement == "fuzzy" and any(room.policy[k] != policy[k] for k in FUZZY_FIELDS):
+                agreement, evidence = "", "模糊匹配设置已更新，等待下一窗口"
             if note:
                 self.notice = note
+                if self.title:
+                    self.candidate = None
             else:
                 self.receive(match, quick, agreement)
             if trace and (monitor.level == "debug" or (error and monitor.level == "errors")):
@@ -351,10 +381,18 @@ class Recognition:
                     summary += f" · {match['title']} - {match['artist']}"
                     if self.title and not agreement:
                         decision = "与播放器标题不符，未采用"
+                    elif quick and agreement in ("fuzzy", "partial"):
+                        decision = "等待完整窗口 · 同一 ID 命中 0/2"
                     elif self.current and self.current["id"] == match["id"]:
                         decision = "已确认"
+                        if agreement in ("fuzzy", "partial"):
+                            decision += " · 同一 ID 命中 2/2"
+                        if agreement == "fuzzy":
+                            decision += " · 模糊兜底采用"
                     else:
                         decision = "候选，等待二次确认"
+                        if agreement in ("fuzzy", "partial"):
+                            decision += " · 同一 ID 命中 1/2"
                     details.extend((decision, "Shazam ID " + match["id"]))
                     details.extend(match[k] for k in ("album", "released") if match.get(k))
                     if evidence:

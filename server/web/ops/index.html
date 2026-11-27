@@ -63,6 +63,9 @@
         <label>校准档位（秒，逗号分隔）<input id="intervals" required></label><label>缓存预算（MiB）<input id="budget" type="number" min="2" max="1024" required></label>
         <label>最多缓存块<input id="blockLimit" type="number" min="1" max="30000" required></label>
         <label>歌曲识别间隔（秒）<input id="recognitionInterval" type="number" min="1" max="300" required></label>
+        <label>模糊匹配兜底<select id="recognitionFuzzy"><option value="on">开启</option><option value="off">关闭</option></select></label>
+        <label>歌名相似度门槛<input id="titleMin" type="number" min="0" max="1" step="any" required></label>
+        <label>艺人相似度门槛<input id="artistMin" type="number" min="0" max="1" step="any" required></label>
         <label>默认同步阈值（秒）<input id="defaultSync" type="number" min="0" max="60" step="0.001" required></label>
         <label>全站上限（秒）<input id="globalCap" type="number" min="0" max="60" step="0.001" required></label>
         <label>本房默认（秒）<input id="roomDefault" type="number" min="0" max="60" step="0.001" placeholder="继承"></label>

@@ -168,11 +168,16 @@ async function run() {
       await page.fill("#history","3"); await page.fill("#intervals","5, 15");
       await page.fill("#lease","8");
       await page.fill("#recognitionInterval","9");
+      await page.selectOption("#recognitionFuzzy","off");
+      await page.fill("#titleMin","0.95");
+      await page.fill("#artistMin","0.89");
       await page.click("#config button");
       await page.waitForFunction(()=>latest.service.pending.history_s===3 && latest.service.pending.lease_s===8);
       assert.equal((await snapshot()).service.active.history_s,3);
       assert.equal((await snapshot()).lease_s,8);
       assert.equal((await snapshot()).service.active.recognition_interval_s,9);
+      const matching=(await snapshot()).service.active;
+      assert.deepEqual([matching.recognition_fuzzy,matching.recognition_title_min,matching.recognition_artist_min],[false,0.95,0.89]);
       await page.click("#maintenance");
       await page.waitForFunction(()=>latest.service.maintenance);
       assert.equal((await host.get(url+"/api/room")).status(),401);
