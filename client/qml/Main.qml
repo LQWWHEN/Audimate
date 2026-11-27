@@ -12,7 +12,7 @@ ApplicationWindow {
     property string dockEdge: ""
     property real fold: 0
     property bool editingDefaults: false
-    readonly property bool popupOpen: editingDefaults || roundSettings.visible || sourceSheet.visible || presets.visible
+    readonly property bool popupOpen: editingDefaults || roundSettings.visible || sourceSheet.visible
     minimumWidth: portrait ? 420 : 960
     minimumHeight: editingDefaults ? (portrait ? 600 : 560) : Math.ceil(Math.max(portrait ? 600 : 560, titleBar.height + footerBar.height
         + (v.entered ? (portrait ? infoHeight + song.height + 128 : Math.max(infoHeight + 44, song.height + 180))
@@ -48,21 +48,21 @@ ApplicationWindow {
             font.weight: parent.prominent ? Font.DemiBold : Font.Medium
             maximumLineCount: 2; wrapMode: Text.Wrap }
     }
-    property var styles: ["pop","heavy","light"]
-    property var styleNames: ["流行摇滚","重型音乐","轻音乐"]
-    property string styleName: styleNames[Math.max(0,styles.indexOf(v.style))]
+    readonly property string hostStyleName: ({pop:"流行摇滚", heavy:"重型音乐", light:"轻音乐", custom:"自定义"})[v.hostStyle] || "流行摇滚"
     readonly property bool reduced: room.localDefaults.motion === "reduced" ||
         (room.localDefaults.motion === "system" && (Qt.styleHints.accessibility?.motionPreference ?? 0) === 1)
     function toggleDefaults() {
         if (editingDefaults) localPage.cancel()
         else { localPage.load(); editingDefaults = true; localPage.forceActiveFocus() }
     }
+    readonly property bool inRoom: !!v.entered
+    onInRoomChanged: if (editingDefaults) localPage.cancel()
     onReducedChanged: if (disc) disc.reduceMotion(reduced)
     Component.onCompleted: disc.reduceMotion(reduced)
     Connections {
         target: room
         function onChanged() {
-            if (!v.entered) { roundSettings.close(); sourceSheet.close(); presets.close() }
+            if (!v.entered) { roundSettings.close(); sourceSheet.close() }
             else password.clear()
         }
     }
@@ -189,50 +189,15 @@ ApplicationWindow {
                 }
                 Column {
                     width: parent.width; spacing: win.valueGap
-                    Word { width: parent.width; horizontalAlignment: Text.AlignRight; text: "频谱风格"; color: win.secondary; font.pixelSize: win.railLabelSize }
+                    Word { width: parent.width; horizontalAlignment: Text.AlignRight; text: "主持风格"; color: win.secondary; font.pixelSize: win.railLabelSize }
+                    Word { width: parent.width; horizontalAlignment: Text.AlignRight
+                        text: v.host ? win.hostStyleName : "—"; font.pixelSize: win.railValueSize }
                     RoomButton {
-                        id: presetButton; objectName: "presetButton"
-                        anchors.right: parent.right
-                        font.pixelSize: win.portrait ? 17 : 18
-                        implicitHeight: win.portrait ? 38 : 42
-                        width: Math.min(implicitWidth, parent.width); horizontalPadding: 10; verticalPadding: 4
-                        rightPadding: 24
-                        text: (v.demo ? "" : v.mine ? "房间 · " : v.following ? "跟随 · " : "自选 · ")+win.styleName
-                        Canvas {
-                            anchors.right: parent.right; anchors.rightMargin: 9; anchors.verticalCenter: parent.verticalCenter
-                            width: 10; height: 7; rotation: presets.visible ? 180 : 0
-                            onPaint: {
-                                const pen = getContext("2d")
-                                pen.clearRect(0, 0, width, height); pen.beginPath()
-                                pen.moveTo(1, 1.5); pen.lineTo(5, 5.5); pen.lineTo(9, 1.5)
-                                pen.strokeStyle = "#c7d3e7"; pen.lineWidth = 1.5; pen.stroke()
-                            }
-                        }
-                        Accessible.name: "可视化预设，"+text
-                        onClicked: presets.visible ? presets.close() : presets.open()
-                        Menu {
-                            id: presets; objectName: "presets"; parent: presetButton
-                            popupType: Popup.Item
-                            y: presetButton.height+4
-                            x: presetButton.width-width
-                            width: Math.min(172, presetButton.parent.width); modal: false; dim: false
-                            font: uiFont
-                            background: Rectangle { radius: 8; color: "#292e42"; border.color: "#535970" }
-                            MenuItem { visible: !v.mine && !v.demo; height: visible ? 36 : 0
-                                text: "跟随主持"; checkable: true; checked: v.following; onTriggered: room.preset("") }
-                            Repeater {
-                                model: win.styleNames
-                                MenuItem {
-                                    required property int index; required property string modelData
-                                    objectName: "preset-" + win.styles[index]
-                                    text: modelData; checkable: true; height: 36
-                                    checked: (v.mine || v.demo || !v.following) && v.style === win.styles[index]
-                                    enabled: !v.busy; onTriggered: room.preset(win.styles[index])
-                                }
-                            }
-                        }
+                        objectName: "adoptSpectrum"; anchors.right: parent.right
+                        text: "采用主持风格"; quiet: true
+                        visible: !v.mine && !v.demo; enabled: !!v.host
+                        implicitHeight: 32; onClicked: room.adoptSpectrum()
                     }
-                    Item { visible: win.portrait && presets.visible; height: presets.implicitHeight; width: 1 }
                     Item {
                         id: recognitionSlot
                         visible: v.recognitionEnabled || !!v.candidate || !!v.recognitionNotice

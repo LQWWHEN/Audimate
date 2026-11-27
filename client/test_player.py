@@ -61,6 +61,10 @@ class AnalysisTests(unittest.TestCase):
             prefs = local_settings.validate(dict(prefs,rate=88200.,bits=24,delay=0))
             local_settings.save(path,prefs)
             self.assertEqual(local_settings.load(path),prefs)
+            path.write_text('{"style":"heavy","delay":65}', encoding="utf8")
+            migrated = local_settings.load(path)
+            self.assertEqual((migrated["spectrum"]["base"], migrated["spectrum"]["count"], migrated["delay"]),
+                             ("heavy", 96, 65))
 
     def test_stereo_opposition_and_supported_formats(self):
         for rate, bits in ((8000,16), (44100,24), (48000,16), (96000,32), (192000,24)):
@@ -73,12 +77,52 @@ class AnalysisTests(unittest.TestCase):
                 analyzer.analyze(chunk)
                 self.assertGreater(analyzer.snapshot[1].max(),.7)
                 peak = analyzer.snapshot[1].argmax()
-                self.assertTrue(peak < 16 if hz==80 else peak > 25)
+                self.assertTrue(peak < len(analyzer.snapshot[1]) // 3 if hz==80 else peak > len(analyzer.snapshot[1]) // 2)
             analyzer.analyze(bytes(len(chunk)))
             self.assertEqual(analyzer.snapshot[1].max(),0)
 
 
 class RoomTests(unittest.TestCase):
+    def test_spectrum_editor_preview_session_and_default(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        QQuickStyle.setStyle("Material")
+        app = QGuiApplication.instance() or QGuiApplication([])
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"LOCALAPPDATA": tmp}):
+            model = RoomView(DEFAULT_DLL)
+            model.clock.stop()
+            engine, window = build_window(model)
+            try:
+                model.user, model.want = "听众", False
+                model.apply(dict(host=dict(name="主持", stream="a", visual_style="heavy", rate=48000, bits=16)))
+                def invoke(obj, expression):
+                    call = QQmlExpression(qmlContext(obj), obj, expression)
+                    call.evaluate()
+                    self.assertFalse(call.hasError(), str(call.error()))
+                invoke(window.findChild(QObject, "adoptSpectrum"), "click()")
+                self.assertEqual(model.profile, model.spectrumPreset("heavy"))
+                editor = window.findChild(QObject, "spectrumEditor")
+                page = window.findChild(QObject, "localSettings")
+                invoke(window, "toggleDefaults()")
+                invoke(editor, 'update("gate", -40)')
+                self.assertTrue(model.preview_profile["custom"])
+                invoke(page, "cancel()")
+                self.assertIsNone(model.preview_profile)
+                self.assertEqual(model.profile["gate"], -50)
+                invoke(window, "toggleDefaults()")
+                invoke(editor, 'update("count", 64)')
+                invoke(page, "save()")
+                self.assertEqual(model.profile["count"], 64)
+                self.assertEqual(local_settings.load(model.pref_file)["spectrum"]["count"], 96)
+                invoke(window, "toggleDefaults()")
+                invoke(window.findChild(QObject, "storeSpectrumDefault"), "click()")
+                model.reset()
+                self.assertEqual(model.profile, local_settings.load(model.pref_file)["spectrum"])
+                self.assertEqual(model.profile["count"], 64)
+            finally:
+                model.close()
+                engine.deleteLater()
+                QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
+
     def test_kick_and_snare_push_the_same_ring_and_respect_reduced_motion(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         app = QGuiApplication.instance() or QGuiApplication([])
@@ -118,7 +162,7 @@ class RoomTests(unittest.TestCase):
         engine, window = build_window(model)
         try:
             frames = [window.findChild(QObject, name) for name in
-                      ("record", "hostRail", "audioRail", "presetButton", "songInfo",
+                      ("record", "hostRail", "audioRail", "adoptSpectrum", "songInfo",
                        "songTitle", "songArtist", "songAlbum")]
             title, artist, album = frames[-3:]
             font_size = QQmlExpression(qmlContext(title), title, "fontInfo.pixelSize")
@@ -245,7 +289,8 @@ class RoomTests(unittest.TestCase):
                 model.login(url,name,"test-player-password",True)
             wait(lambda: a.state and b.state)
             self.assertTrue(a.want and b.want)
-            self.assertEqual(a.saveDefaults(dict(a.localDefaults,codec=codec,style="heavy",receive=a.receive)), "")
+            self.assertEqual(a.saveDefaults(dict(a.localDefaults,codec=codec,receive=a.receive)), "")
+            a.applySpectrum(a.spectrumPreset("heavy"), False)
             sheet = window.findChild(QObject,"sourceSheet")
             self.assertTrue(QMetaObject.invokeMethod(sheet,"open"))
             wait(lambda: a.items)
@@ -264,7 +309,7 @@ class RoomTests(unittest.TestCase):
                             nodes.extend(node.childItems())
                     wait(share_button)
                     self.assertTrue(QMetaObject.invokeMethod(share_button(),"click"))
-                    wait(lambda: b.view["playing"] and b.view["style"]=="heavy")
+                    wait(lambda: b.view["playing"] and b.view["hostStyle"]=="heavy")
                     wait(lambda: b.analyzer.snapshot[1].max()>.3)
                     self.assertTrue(a.capture and a.view["mine"])
                     self.assertIn(codec.split()[0], b.view["received"])
@@ -281,35 +326,30 @@ class RoomTests(unittest.TestCase):
                     self.assertEqual((b.view["title"], b.view["album"]), ("曲目甲", "专辑甲"))
                     self.assertEqual(b.view["candidate"], "曲目乙 — 歌手乙")
                     b.apply(old_state)
-                    b.preset("light")
-                    menu = window.findChild(QObject, "presets")
-                    QMetaObject.invokeMethod(window.findChild(QObject, "presetButton"), "click")
-                    wait(lambda: menu.property("opened"))
-                    self.assertFalse(menu.property("modal"))
-                    items = [window.contentItem()]
-                    while items:
-                        item = items.pop()
-                        if item.objectName() == "preset-pop":
-                            break
-                        items.extend(item.childItems())
-                    self.assertEqual(item.objectName(), "preset-pop")
-                    point = item.mapToScene(item.boundingRect().center()).toPoint()
-                    QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, point)
-                    wait(lambda: b.state["host"]["visual_style"]=="pop")
-                    self.assertEqual(b.view["style"],"light")
+                    self.assertEqual(b.profile, b.spectrumPreset("pop"))
+                    custom = dict(a.spectrumPreset("heavy"), custom=True, count=48, eq=[5, 1, -2, 0])
+                    self.assertEqual(a.publishSpectrum(custom), "")
+                    wait(lambda: b.view["hostStyle"] == "custom")
+                    self.assertEqual(b.profile, b.spectrumPreset("pop"))
+                    b.adoptSpectrum()
+                    self.assertEqual(b.profile, custom)
+                    wait(lambda: len(b.analyzer.snapshot[1]) == 48)
+                    self.assertEqual(a.publishSpectrum(a.spectrumPreset("light")), "")
+                    wait(lambda: b.view["hostStyle"] == "light")
+                    self.assertEqual(b.profile, custom)
                 else:
-                    model.requestStage(key,48000,16,codec,False,"",style)
+                    model.requestStage(key,48000,16,codec,False,"")
             wait(lambda: a.view["requests"] and b.view["pending"])
             self.assertTrue(b.listener and not b.capture)
             a.decide("accept",a.view["requests"][0]["id"])
             wait(lambda: b.capture and a.listener and a.view["playing"])
-            self.assertEqual(b.view["style"],"pop")
+            self.assertEqual(b.view["hostStyle"],"custom")
             b.leaveStage("")
             wait(lambda: not a.state.get("host"))
-            self.assertEqual(b.view["style"],"light")
+            self.assertEqual(b.profile,custom)
             b.exitRoom()
             wait(lambda: not b.user)
-            self.assertEqual(b.override,"")
+            self.assertEqual(b.profile,b.spectrumPreset("pop"))
             engine.deleteLater()
             QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
 

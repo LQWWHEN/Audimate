@@ -15,13 +15,14 @@ import traceback
 from urllib.parse import parse_qs, urlsplit
 
 if __package__:
-    from . import flac, recognition
+    from . import flac, recognition, spectrum_config
     from .monitor import Member, Monitor, client_type
     from .control import DEFAULT, FUZZY_FIELDS, Control, Problem, sync_ms
     from .media import Media, History
 else:  # Gunicorn imports app:create_app() from the deployment directory.
     import flac
     import recognition
+    import spectrum_config
     from monitor import Member, Monitor, client_type
     from control import DEFAULT, FUZZY_FIELDS, Control, Problem, sync_ms
     from media import Media, History
@@ -75,10 +76,17 @@ def fields(env):
     return data
 
 
-def visual_style(value):
+def visual_settings(data):
+    value = data.get("visual_style", "pop")
     if value not in ("pop", "heavy", "light"):
         raise Problem(400, "未知的可视化预设")
-    return value
+    try:
+        config = spectrum_config.validate(data["spectrum"]) if "spectrum" in data else spectrum_config.preset(value)
+    except ValueError as exc:
+        raise Problem(400, str(exc)) from exc
+    if config["base"] != value:
+        raise Problem(400, "频谱基础预设不匹配")
+    return dict(visual_style=value, spectrum=config)
 
 
 class Room:
@@ -284,7 +292,7 @@ class Room:
             elif info:
                 public_host["source"] = "尝试匹配中"
         return {"room_id": self.room_id, "sync_policy": self.sync_policy(), "host": public_host,
-                "recognition_available": self.can_recognize(),
+                "recognition_available": self.can_recognize(), "spectrum_version": 1,
                 "hosting": mine, "pending": key in self.pending,
                 "requests": [{"id": req["id"], "name": req["name"]} for req in self.pending.values()] if mine else [],
                 "members": len(self.members), "livekit": self.media.enabled, "flac": flac.AVAILABLE}
@@ -323,7 +331,7 @@ class Room:
                 raise Problem(400, "不支持所选 Opus 码率")
             choice = dict(name=name, rate=rate, bits=bits, source=label.strip(), codec=codec, compression=compression,
                           channels=2, bitrate=bitrate if codec == "opus" else rate * bits * 2, id=secrets.token_hex(8))
-            choice["visual_style"] = visual_style(data.get("visual_style", "pop"))
+            choice.update(visual_settings(data))
             value = data.get("sync_request_ms")
             choice["recognize"] = data.get("recognize", False)
             if type(choice["recognize"]) is not bool or choice["recognize"] and not self.can_recognize():
@@ -348,7 +356,9 @@ class Room:
                 raise Problem(409, "主持已变更")
             if self.host["key"] != key:
                 raise Problem(403, "仅主持可调整房间预设")
-            self.host["visual_style"] = visual_style(data.get("visual_style"))
+            if "visual_style" not in data:
+                raise Problem(400, "缺少频谱预设")
+            self.host.update(visual_settings(data))
         elif action == "track":
             if not self.host or self.host["stream"] != data.get("stream"):
                 raise Problem(409, "主持已变更")

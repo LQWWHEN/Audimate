@@ -107,6 +107,15 @@ class Integration(unittest.TestCase):
             self.bob.request("stage/style", change)
         self.alice.request("stage/style", change)
         self.assertEqual(self.bob.request("room")["host"]["visual_style"], "heavy")
+        profile = dict(self.bob.request("room")["host"]["spectrum"], start=30, custom=True)
+        self.alice.request("stage/style", dict(change, spectrum=profile))
+        self.assertEqual(self.bob.request("room")["host"]["spectrum"], profile)
+        for invalid in (dict(profile, count=10000), dict(profile, eq=[3]), dict(profile, version=2)):
+            with self.assertRaisesRegex(OSError, "400"):
+                self.alice.request("stage/style", dict(change, spectrum=invalid))
+        self.assertEqual(self.bob.request("room")["host"]["spectrum"], profile)
+        self.alice.request("stage/style", change)
+        self.assertFalse(self.bob.request("room")["host"]["spectrum"]["custom"])
         with self.assertRaisesRegex(OSError, "400"):
             self.alice.request("stage/style", dict(change, visual_style="invalid"))
         self.bob.request("stage/request", dict(self.choice, visual_style="light"))

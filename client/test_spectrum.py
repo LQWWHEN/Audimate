@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from .spectrum import BANDS, Spectrum, band_edges
+from server.spectrum_config import preset
 
 
 RATE = 48000
@@ -13,6 +14,25 @@ def pcm(mono):
 
 
 class SpectrumTests(unittest.TestCase):
+    def test_settings_shape_only_the_analysis_and_can_change_on_a_live_stream(self):
+        t = np.arange(RATE//3) / RATE
+        signal = pcm(.003*np.sin(2*np.pi*1000*t))
+        def level(**settings):
+            analyzer = Spectrum(RATE, 16, dict(preset(), **settings))
+            analyzer.analyze(signal)
+            return analyzer.snapshot[1].max()
+        self.assertGreater(level(gate=-72), .15)
+        self.assertEqual(level(gate=-40), 0)
+        self.assertGreater(level(gate=-72, eq=[0,0,9,0]), level(gate=-72))
+        self.assertLess(level(gate=-72, contrast=3), level(gate=-72, contrast=.5))
+        analyzer = Spectrum(RATE, 16)
+        for count, start in ((96,20), (48,40), (64,10)):
+            analyzer.requested_config = dict(preset(), count=count, start=start, transient=0)
+            analyzer.analyze(pcm(.4*np.sin(2*np.pi*80*t)))
+            self.assertEqual(len(analyzer.snapshot[1]), count)
+            self.assertEqual(analyzer.snapshot[2:], (0, 0))
+            self.assertAlmostEqual(band_edges(RATE, start, count)[0], start)
+
     def test_bass_mapping_and_sub_bass_signal(self):
         for rate in (8000, 44100, 48000, 96000, 192000):
             with self.subTest(rate=rate):
