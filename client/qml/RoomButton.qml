@@ -10,8 +10,8 @@ T.Button {
     implicitHeight: 40
     implicitWidth: Math.max(58, label.implicitWidth + leftPadding + rightPadding + 2)
     hoverEnabled: true
-    font.family: "Microsoft YaHei UI"
-    font.pixelSize: 13
+    font.family: uiFont.family
+    font.pixelSize: 16
     background: Rectangle {
         radius: 10
         color: button.primary ? (button.hovered ? "#e7d9ff" : "#d8cef4")

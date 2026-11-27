@@ -11,7 +11,8 @@ from unittest.mock import patch
 from wsgiref.simple_server import make_server
 
 import numpy as np
-from PySide6.QtCore import QObject, QMetaObject, QCoreApplication, QEvent
+from PySide6.QtCore import QObject, QMetaObject, QCoreApplication, QEvent, Qt
+from PySide6.QtTest import QTest
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQuickControls2 import QQuickStyle
 
@@ -109,7 +110,19 @@ class RoomTests(unittest.TestCase):
                     self.assertEqual(b.view["candidate"], "曲目乙 — 歌手乙")
                     b.apply(old_state)
                     b.preset("light")
-                    a.preset("pop")
+                    menu = window.findChild(QObject, "presets")
+                    QMetaObject.invokeMethod(window.findChild(QObject, "presetButton"), "click")
+                    wait(lambda: menu.property("opened"))
+                    self.assertFalse(menu.property("modal"))
+                    items = [window.contentItem()]
+                    while items:
+                        item = items.pop()
+                        if item.objectName() == "preset-pop":
+                            break
+                        items.extend(item.childItems())
+                    self.assertEqual(item.objectName(), "preset-pop")
+                    point = item.mapToScene(item.boundingRect().center()).toPoint()
+                    QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, point)
                     wait(lambda: b.state["host"]["visual_style"]=="pop")
                     self.assertEqual(b.view["style"],"light")
             wait(lambda: a.view["requests"] and b.view["pending"])

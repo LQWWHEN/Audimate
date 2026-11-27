@@ -12,8 +12,8 @@ from .spectrum import BANDS
 
 ICE = QColor("#9edcf4")
 # amplitude, kick displacement, cover displacement, release seconds
-MOTION = {"heavy": (.35, .13, .045, .105), "pop": (.24, .075, .022, .16),
-          "light": (.13, .020, .004, .3)}
+MOTION = {"heavy": (.35, .13, .045, .085), "pop": (.24, .075, .022, .125),
+          "light": (.13, .020, .004, .24)}
 
 
 def tint(color, alpha):
@@ -82,15 +82,15 @@ class Disc(QQuickPaintedItem):
         if not self.isVisible():
             return
         stamp, bands, kick, snare = self.analyzer.snapshot if self.analyzer else (0, 0, 0, 0)
-        fresh = now - stamp < .12
+        fresh = now - stamp < .08
         if not fresh and max(self.kick, self.snare, self.bands.max()) < .001 and now - self.fade_start > .65:
             return
         self.motion += (np.array(MOTION[self.style]) - self.motion) * min(1., dt * 8)
         target = bands if fresh else 0
-        self.bands += (target - self.bands) * (1 - np.exp(-dt / np.where(target > self.bands, .022, self.motion[3])))
+        self.bands += (target - self.bands) * (1 - np.exp(-dt / np.where(target > self.bands, .017, self.motion[3])))
         onset = fresh and stamp != self.last_audio
-        self.kick = max(kick if onset else 0, self.kick * math.exp(-dt / .13))
-        self.snare = max(snare if onset else 0, self.snare * math.exp(-dt / .08))
+        self.kick = max(kick if onset else 0, self.kick * math.exp(-dt / .103))
+        self.snare = max(snare if onset else 0, self.snare * math.exp(-dt / .065))
         self.last_audio = stamp
         self.update()
 
@@ -114,7 +114,7 @@ class Disc(QQuickPaintedItem):
         base = unit * .68
         inner = base * (1 + (0 if self.reduced else self.kick*self.motion[1]))
         levels = np.r_[self.bands, self.bands[-2:0:-1]]
-        levels = (np.roll(levels, 1) + 2 * levels + np.roll(levels, -1)) / 4
+        levels = .70 * levels + .15 * (np.roll(levels, 1) + np.roll(levels, -1))
         power = .27 if self.reduced else 1.
         radii = inner + base * (.016 + power * (levels*self.motion[0] + self.snare*self.motion[1]*.42))
         points = [QPointF(x, y) for x,y in zip(self.dx*radii, self.dy*radii)]
