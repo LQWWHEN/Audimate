@@ -134,6 +134,31 @@ async function run() {
     stream = null;
     await page.waitForFunction(() => document.querySelector("#streamState").textContent === "空席");
     if (service) {
+      await page.selectOption("#filter", "识别");
+      assert.ok(await page.isVisible("#emptyEvents"));
+      if (process.env.AUDIMATE_RECOGNITION_WAV) {
+        const wav = process.env.AUDIMATE_RECOGNITION_WAV;
+        const extract = "import sys,wave; f=wave.open(sys.argv[1]); " +
+          "assert (f.getnchannels(), f.getsampwidth()) == (2, 2); sys.stdout.buffer.write(f.readframes(5*f.getframerate()))";
+        const pcm = execFileSync(python, ["-c", extract, wav], {maxBuffer: 4*1024*1024, windowsHide: true});
+        const rate = pcm.length / (5*4);
+        const stage = await post(host, "/api/stage/request", {source:"测试样本", rate, bits:16, recognize:true});
+        stream = (await stage.json()).host.stream;
+        await post(host, "/api/stage/track", {stream, track:{title:"I Will Survive", artist:"Gloria Gaynor"}});
+        for (let pos=0; pos<pcm.length; pos+=rate*4/5) {
+          await post(host, "/api/audio?stream="+stream, pcm.subarray(pos, pos+rate*4/5));
+        }
+        await page.waitForFunction(()=>document.querySelector("#log").textContent.includes("Quick Fetch"));
+        const result = await page.textContent("#log");
+        assert.match(result, /I Will Survive - Gloria Gaynor/);
+        assert.match(result, /已确认 · Shazam ID 482734446 · Love Tracks · 1978/);
+        assert.match(result, /200/);
+        console.log(result);
+        await page.selectOption("#filter", "异常");
+        assert.ok(!(await page.textContent("#log")).includes("Shazam ID"));
+        await post(host, "/api/stage/leave", {stream});
+        stream = null;
+      }
       page.on("dialog",dialog=>dialog.accept());
       assert.equal(await page.inputValue("#lease"), "20");
       assert.ok(await page.isEnabled("#lease"));

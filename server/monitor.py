@@ -183,8 +183,8 @@ class Monitor:
                              p50=values[(len(values)-1)//2], p95=values[math.ceil(len(values)*.95)-1], peak=values[-1]))
         return dict(stream=stream, labels=STAGES, rows=rows)
 
-    def event(self, kind, message):
-        if self.level == "off" or self.level == "errors" and kind not in ("异常", "传输"):
+    def event(self, kind, message, *, detail=None, error=False):
+        if self.level == "off" or self.level == "errors" and not error and kind not in ("异常", "传输"):
             return
         timestamp = int(time.time())
         if self.events and kind == "异常":
@@ -193,7 +193,12 @@ class Monitor:
                 last["time"] = timestamp
                 last["count"] += 1
                 return
-        self.events.appendleft(dict(time=timestamp, kind=kind, message=message, count=1))
+        entry = dict(time=timestamp, kind=kind, message=message, count=1)
+        if detail:
+            entry["detail"] = detail
+        if error:
+            entry["error"] = True
+        self.events.appendleft(entry)
 
     def traffic(self, member, *, received=0, sent=0):
         second = int(time.monotonic())

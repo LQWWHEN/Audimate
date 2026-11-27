@@ -10,6 +10,7 @@ import wave
 
 WINDOW_S = 12
 QUICK_S = 5
+QUERY_TIMEOUT_S = 8
 AVAILABLE = find_spec("shazamio") is not None
 
 
@@ -49,10 +50,53 @@ def track_info(answer):
     return result
 
 
-async def identify(wav):
+class QueryTrace:
+    """Per-query milestones from the SDK's HTTP client. Never retain request or response bodies."""
+
+    def __init__(self):
+        self.responses = []
+        self.mark("准备音频")
+
+    def mark(self, stage):
+        self.stage = stage
+        self.since = time.monotonic()
+
+    def attach(self, config):
+        async def request_start(session, ctx, params):
+            self.responses.append(None)
+            self.mark("准备连接")
+
+        async def response_headers(session, ctx, params):
+            self.responses[-1] = params.response.status
+            self.mark("收到响应头，等待读取或重试")
+
+        def milestone(stage):
+            async def record(session, ctx, params):
+                self.mark(stage)
+            return record
+
+        config.on_request_start.append(request_start)
+        config.on_connection_create_start.append(milestone("建立 TCP/TLS 连接"))
+        config.on_dns_resolvehost_start.append(milestone("解析 DNS"))
+        config.on_dns_resolvehost_end.append(milestone("建立 TCP/TLS 连接"))
+        config.on_request_headers_sent.append(milestone("发送请求体"))
+        config.on_request_chunk_sent.append(milestone("等待上游响应头"))
+        config.on_request_end.append(response_headers)
+        self.mark("生成指纹并准备请求")
+
+    def http_summary(self):
+        if not self.responses:
+            return "尚未发起 HTTP 请求"
+        statuses = " → ".join(str(code) if code is not None else "未收到响应头" for code in self.responses)
+        return f"HTTP 尝试 {len(self.responses)} 次（{statuses}）"
+
+
+async def identify(wav, trace=None):
     from shazamio import Shazam
     async with Shazam(language="en-US") as service:
-        answer = await asyncio.wait_for(service.recognize(wav), timeout=8)
+        if trace is not None:
+            trace.attach(service.http_client.trace_config)
+        answer = await asyncio.wait_for(service.recognize(wav), timeout=QUERY_TIMEOUT_S)
     return track_info(answer)
 
 
@@ -135,15 +179,23 @@ class Recognition:
             if room.recognition is not self:
                 room.recognition_busy = False
                 return
+            monitor = room.monitor
+            trace = QueryTrace() if monitor.development and monitor.level != "off" else None
         started = time.monotonic()
-        note = ""
+        note = error = ""
+        match = None
         try:
-            match = asyncio.run(identify(encode_window(parts, rate, width, quick)))
+            match = asyncio.run(identify(encode_window(parts, rate, width, quick), trace))
             outcome = "命中" if match else "未匹配"
-        except TimeoutError:
+        except asyncio.TimeoutError as exc:
             outcome, note = "超时", "识别超时，稍后重试"
+            error = f"{type(exc).__name__} · 查询时限 {QUERY_TIMEOUT_S:g} 秒"
         except Exception as exc:
-            outcome, note = type(exc).__name__, "识别暂不可用，稍后重试"
+            outcome, note = "失败", "识别暂不可用，稍后重试"
+            error = type(exc).__name__
+            if isinstance(exc, OSError) and isinstance(exc.errno, int):
+                error += f" (errno {exc.errno})"
+        finished = time.monotonic()
         with room.lock:
             room.recognition_busy = False
             if room.recognition is not self:
@@ -152,6 +204,21 @@ class Recognition:
                 self.notice = note
             else:
                 self.receive(match, quick)
-            if room.monitor.development and room.monitor.level == "debug":
+            if trace and (monitor.level == "debug" or (error and monitor.level == "errors")):
                 mode = "Quick Fetch" if quick else "完整窗口"
-                room.monitor.event("识别", f"{mode} · {outcome} · {round((time.monotonic()-started)*1000)} ms")
+                summary = f"{mode} · {outcome} · {round((finished-started)*1000)} ms"
+                details = []
+                if error:
+                    details.extend((error, f"{trace.stage} {round((finished-trace.since)*1000)} ms"))
+                elif match:
+                    summary += f" · {match['title']} - {match['artist']}"
+                    if self.title and not matches_title(match, self.title):
+                        decision = "与播放器标题不符，未采用"
+                    elif self.current and self.current["id"] == match["id"]:
+                        decision = "已确认"
+                    else:
+                        decision = "候选，等待二次确认"
+                    details.extend((decision, "Shazam ID " + match["id"]))
+                    details.extend(match[k] for k in ("album", "released") if match.get(k))
+                details.append(trace.http_summary())
+                monitor.event("识别", summary, detail=" · ".join(details), error=bool(error))

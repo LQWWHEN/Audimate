@@ -145,6 +145,8 @@ python3 ops_admin.py --db /var/lib/audimate/accounts.sqlite3 revoke existing-use
 
 播放器有标题时先取 5 秒音频并在末尾补静音至 12 秒，曲名与歌手匹配即可补充资料。无标题时使用完整窗口，同一录音的再次确认至少包含 10 秒新音频。检查超时保留现有曲目和候选。一次请求上限为 8 秒，每房最多一个在途请求，开发运维事件记录查询类型、结果和耗时。
 
+开发版运维页的「排障事件 → 识别」显示 Shazam 实际返回的歌名、歌手、录音 ID，以及查询返回的专辑和发行时间。每次命中标明候选、已确认或与播放器标题不符。超时和失败也可在「异常」筛选中查看，包含异常类型、最后观测到的阶段及该阶段耗时、HTTP 尝试次数与各次响应状态。「未收到响应头」表示截至查询结束仍未观测到响应头。日志级别「仅异常」只新增失败和超时事件，「关闭」停止记录并清空事件。
+
 真实识别验收使用 ShazamIO 仓库 `examples/data/Gloria.ogg`，将其前 28 秒转换为双声道 PCM WAV，设置 `AUDIMATE_RECOGNITION_WAV` 为文件绝对路径后运行 `python -m unittest client.test_recognition_live -v`。用例需要 Windows、Chrome、Playwright 和服务端识别依赖。可在隔离的本地 LiveKit 环境设置 `AUDIMATE_RECOGNITION_RTC=1` 验证 Opus 主持。
 
 ## 验证

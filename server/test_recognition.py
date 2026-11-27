@@ -1,4 +1,5 @@
 from io import BytesIO
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
@@ -62,12 +63,88 @@ class RecognitionTests(unittest.TestCase):
         self.assertIsNone(self.room.recognition.current)
         self.assertEqual(self.status()["source"], "B - Artist")
 
+    def test_ops_reports_provider_match_and_acceptance_separately(self):
+        self.title("B")
+        state = self.room.recognition
+        def query(key, quick):
+            with patch.object(recognition, "identify", AsyncMock(return_value=song(key))):
+                state.run(self.room, [bytes(32)], 8000, 2, quick)
+            return self.room.monitor.events[0]
+        event = query("A", True)
+        self.assertIn("Quick Fetch · 命中", event["message"])
+        self.assertIn("A - Artist", event["message"])
+        self.assertIn("与播放器标题不符，未采用", event["detail"])
+        self.assertIsNone(state.current)
+        self.title(None)
+        state = self.room.recognition
+        self.assertIn("候选", query("B", False)["detail"])
+        confirmed = query("B", False)
+        self.assertIn("已确认", confirmed["detail"])
+        self.assertIn("Shazam ID B · Album B", confirmed["detail"])
+
+    def test_ops_log_levels_and_exception_redaction(self):
+        monitor = self.room.monitor
+        state = self.room.recognition
+        monitor.set_level("errors")
+        with patch.object(recognition, "identify", AsyncMock(return_value=song("A"))):
+            state.run(self.room, [bytes(32)], 8000, 2, False)
+        self.assertFalse(any(e["kind"] == "识别" for e in monitor.events))
+        with patch.object(recognition, "identify", AsyncMock(side_effect=OSError(5, "private-url"))):
+            state.run(self.room, [bytes(32)], 8000, 2, False)
+            event = monitor.events[0]
+            self.assertTrue(event["error"])
+            self.assertIn("errno 5", event["detail"])
+            self.assertNotIn("private-url", str(event))
+            monitor.set_level("off")
+            state.run(self.room, [bytes(32)], 8000, 2, False)
+            self.assertFalse(monitor.events)
+            monitor.set_level("debug")
+            monitor.development = False
+            state.run(self.room, [bytes(32)], 8000, 2, False)
+            self.assertFalse(monitor.events)
+
+    @unittest.skipUnless(recognition.AVAILABLE, "requires ShazamIO")
+    def test_ops_timeout_after_http_retry(self):
+        from shazamio.api import ShazamUrl
+        release = threading.Event()
+        class Upstream(BaseHTTPRequestHandler):
+            attempts = 0
+
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                Upstream.attempts += 1
+                if Upstream.attempts == 1:
+                    self.send_response(429)
+                    self.end_headers()
+                else:
+                    release.wait(8)
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Upstream) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            try:
+                target = f"http://127.0.0.1:{server.server_port}/private-path"
+                with patch.object(ShazamUrl, "SEARCH_FROM_FILE", target), patch.object(recognition, "QUERY_TIMEOUT_S", 2):
+                    self.room.monitor.set_level("errors")
+                    self.room.recognition.run(self.room, [bytes(12*8000*4)], 8000, 2, False)
+            finally:
+                release.set()
+                server.shutdown()
+        event = self.room.monitor.events[0]
+        self.assertEqual((event["kind"], event["error"]), ("识别", True))
+        self.assertIn("完整窗口 · 超时", event["message"])
+        for expected in ("TimeoutError", "时限 2 秒", "等待上游响应头", "HTTP 尝试 2 次（429 → 未收到响应头）"):
+            self.assertIn(expected, event["detail"])
+        self.assertNotIn("private-path", str(event))
+
     def test_inflight_invalidated_by_title_cache_and_handoff(self):
         for change in ("title", "limits", "handoff"):
             self.title("A")
             old = self.room.recognition
             started, release = threading.Event(), threading.Event()
-            async def delayed(wav):
+            async def delayed(wav, trace):
                 started.set()
                 release.wait(3)
                 return song("A")
@@ -90,6 +167,7 @@ class RecognitionTests(unittest.TestCase):
                     release.set()
                     worker.join(3)
             self.assertIsNone(self.room.recognition.current)
+            self.assertFalse(any(e["kind"] == "识别" for e in self.room.monitor.events))
 
     def test_window_selection_padding_and_interval_changes(self):
         rate, width = 8000, 3

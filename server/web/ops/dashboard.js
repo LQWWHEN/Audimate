@@ -141,13 +141,19 @@ function plot() {
 
 function events() {
   if (!latest) return;
-  const choice = byId("filter").value;
-  const rows = latest.events.filter(e => choice === "全部" || e.kind === choice).map(e => {
+  const filter = byId("filter");
+  const recognition = filter.querySelector('option[value="识别"]');
+  if (latest.timing && !recognition) filter.add(new Option("识别", "识别"));
+  if (!latest.timing && recognition) recognition.remove();
+  const choice = filter.value;
+  const rows = latest.events.filter(e => choice === "全部" || e.kind === choice || (choice === "异常" && e.error)).map(e => {
     const row = document.createElement("li");
     const kind = node("span", e.kind);
     kind.className = "tag";
-    kind.dataset.kind = e.kind;
-    row.append(node("time", clock(e.time)), kind, node("span", e.message + (e.count > 1 ? " ×" + e.count : "")));
+    kind.dataset.kind = e.error ? "异常" : e.kind;
+    const message = node("span", e.message + (e.count > 1 ? " ×" + e.count : ""));
+    if (e.detail) message.append(node("small", e.detail));
+    row.append(node("time", clock(e.time)), kind, message);
     return row;
   });
   byId("log").replaceChildren(...rows);
