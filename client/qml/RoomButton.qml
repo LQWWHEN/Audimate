@@ -25,6 +25,7 @@ T.Button {
         text: button.text
         elide: Text.ElideNone
         horizontalAlignment: Text.AlignHCenter
+        font.pixelSize: button.font.pixelSize
         font.weight: button.primary ? Font.DemiBold : Font.Normal
         color: !button.enabled ? "#9293a3" : button.primary ? "#242136" : "#e5e5f1"
     }

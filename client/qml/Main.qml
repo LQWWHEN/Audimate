@@ -26,6 +26,22 @@ ApplicationWindow {
     property var v: room.view
     property color secondary: "#b6b9ce"
     property color muted: "#a0a6c0"
+    readonly property int railLabelSize: portrait ? 16 : 17
+    readonly property int railValueSize: portrait ? 20 : 22
+    readonly property int valueGap: portrait ? 5 : 8
+    component RailReading: Column {
+        required property string caption
+        required property string value
+        property bool inwardRight: false
+        property bool prominent: false
+        spacing: win.valueGap
+        Word { width: parent.width; horizontalAlignment: parent.inwardRight ? Text.AlignRight : Text.AlignLeft
+            text: parent.caption; color: win.secondary; font.pixelSize: win.railLabelSize }
+        Word { width: parent.width; horizontalAlignment: parent.inwardRight ? Text.AlignRight : Text.AlignLeft
+            text: parent.value; font.pixelSize: parent.prominent ? win.railValueSize+4 : win.railValueSize
+            font.weight: parent.prominent ? Font.DemiBold : Font.Medium
+            maximumLineCount: 2; wrapMode: Text.Wrap }
+    }
     property var styles: ["pop","heavy","light"]
     property var styleNames: ["流行摇滚","重型音乐","轻音乐"]
     property string styleName: styleNames[Math.max(0,styles.indexOf(v.style))]
@@ -59,9 +75,19 @@ ApplicationWindow {
             anchors { top: titleBar.bottom; bottom: footerBar.top; left: parent.left; right: parent.right }
             readonly property real infoTop: height - win.infoHeight - 12
             readonly property real centerHeight: win.portrait ? infoTop - 8 : height
-            readonly property real leftRailEnd: win.portrait ? width / 2 - 10 : disc.x + disc.width * .045 - 10
+            readonly property real discColumnWidth: Math.min(width * .48, 540)
+            readonly property real leftRailEnd: win.portrait ? width / 2 - 10 : (width-discColumnWidth)/2 + discColumnWidth*.045 - 10
             readonly property real railWidth: Math.min(270, leftRailEnd - (win.portrait ? 14 : 24))
-            readonly property real railTop: win.portrait ? infoTop : disc.y + disc.height / 2 - win.infoHeight / 2
+            readonly property real groupGap: win.portrait ? 18 : Math.min(44, Math.round(width * .034))
+            readonly property real upperRowHeight: Math.max(hostReading.implicitHeight, sharedReading.implicitHeight)
+            readonly property real railTop: win.portrait ? infoTop : Math.max(12, Math.min(height - win.infoHeight - 12,
+                disc.y + disc.height / 2 - upperRowHeight - groupGap / 2))
+            function formatQuality(value) {
+                // Keep the unit attached to its number when a narrow rail wraps.
+                return value.replace(/ {2,}/g, win.portrait ? " " : "\u2002")
+                            .replace(/(\d) (kHz|bit|kbps)\b/g, "$1\u202f$2")
+                            .replace(/ \/ /g, win.portrait ? "\u2009/\u2009" : " / ")
+            }
             SpectrumDisc {
                 id: disc; objectName: "record"
                 parent: localPage.showDisc ? localPage.preview : field
@@ -74,8 +100,8 @@ ApplicationWindow {
                              : win.portrait ? Math.max(0,(field.height-height-login.height)/2) : (field.height-height-45)*.46
             }
             Column {
-                id: song; spacing: 4
-                width: v.entered ? (!win.portrait? field.width*.53:field.width-40) : (win.portrait?field.width-40:field.width*.49)
+                id: song; objectName: "songInfo"; spacing: 4
+                width: v.entered ? (!win.portrait ? field.width-2*field.leftRailEnd-24 : field.width-40) : (win.portrait?field.width-40:field.width*.49)
                 x: (v.entered || win.portrait ? field.width*.5 : field.width*.285) - width/2
                 y: disc.y+disc.height-8
                 visible: v.entered || !win.portrait
@@ -115,59 +141,82 @@ ApplicationWindow {
             }
 
             Column {
-                id: sessionInfo; objectName: "hostRail"; visible: v.entered; spacing: 5
+                id: sessionInfo; objectName: "hostRail"; visible: v.entered; spacing: field.groupGap
                 width: field.railWidth; x: field.leftRailEnd-width; y: field.railTop
-                Word { width: parent.width; horizontalAlignment: Text.AlignRight; text: v.demo ? "试听音源" : "房间主持"; color: muted; font.pixelSize: 15 }
-                Word { width: parent.width; horizontalAlignment: Text.AlignRight; text: v.demo ? "本地合成器" : v.host || "席位空闲"; font.pixelSize: 23; font.weight: Font.DemiBold }
-                RoomButton {
-                    id: presetButton; objectName: "presetButton"
-                    anchors.right: parent.right
-                    width: Math.min(implicitWidth, parent.width); horizontalPadding: 9
-                    text: (v.demo ? "" : v.mine ? "房间 · " : v.following ? "跟随 · " : "自选 · ")+win.styleName+" ▾"
-                    Accessible.name: "可视化预设，"+text
-                    onClicked: presets.visible ? presets.close() : presets.open()
-                    Menu {
-                        id: presets; objectName: "presets"; parent: presetButton
-                        popupType: Popup.Item
-                        y: presetButton.height+4
-                        x: presetButton.width-width
-                        width: Math.min(172, presetButton.parent.width); modal: false; dim: false
-                        font: uiFont
-                        background: Rectangle { radius: 8; color: "#292e42"; border.color: "#535970" }
-                        MenuItem { visible: !v.mine && !v.demo; height: visible ? 36 : 0
-                            text: "跟随主持"; checkable: true; checked: v.following; onTriggered: room.preset("") }
-                        Repeater {
-                            model: win.styleNames
-                            MenuItem {
-                                required property int index; required property string modelData
-                                objectName: "preset-" + win.styles[index]
-                                text: modelData; checkable: true; height: 36
-                                checked: (v.mine || v.demo || !v.following) && v.style === win.styles[index]
-                                enabled: !v.busy; onTriggered: room.preset(win.styles[index])
+                RailReading {
+                    id: hostReading; width: parent.width; height: field.upperRowHeight
+                    caption: v.demo ? "试听音源" : "房间主持"; value: v.demo ? "本地合成器" : v.host || "席位空闲"
+                    inwardRight: true; prominent: true
+                }
+                Column {
+                    width: parent.width; spacing: win.valueGap
+                    Word { width: parent.width; horizontalAlignment: Text.AlignRight; text: "频谱风格"; color: win.secondary; font.pixelSize: win.railLabelSize }
+                    RoomButton {
+                        id: presetButton; objectName: "presetButton"
+                        anchors.right: parent.right
+                        font.pixelSize: win.portrait ? 17 : 18
+                        implicitHeight: win.portrait ? 38 : 42
+                        width: Math.min(implicitWidth, parent.width); horizontalPadding: 10; verticalPadding: 4
+                        rightPadding: 24
+                        text: (v.demo ? "" : v.mine ? "房间 · " : v.following ? "跟随 · " : "自选 · ")+win.styleName
+                        Canvas {
+                            anchors.right: parent.right; anchors.rightMargin: 9; anchors.verticalCenter: parent.verticalCenter
+                            width: 10; height: 7; rotation: presets.visible ? 180 : 0
+                            onPaint: {
+                                const pen = getContext("2d")
+                                pen.clearRect(0, 0, width, height); pen.beginPath()
+                                pen.moveTo(1, 1.5); pen.lineTo(5, 5.5); pen.lineTo(9, 1.5)
+                                pen.strokeStyle = "#c7d3e7"; pen.lineWidth = 1.5; pen.stroke()
+                            }
+                        }
+                        Accessible.name: "可视化预设，"+text
+                        onClicked: presets.visible ? presets.close() : presets.open()
+                        Menu {
+                            id: presets; objectName: "presets"; parent: presetButton
+                            popupType: Popup.Item
+                            y: presetButton.height+4
+                            x: presetButton.width-width
+                            width: Math.min(172, presetButton.parent.width); modal: false; dim: false
+                            font: uiFont
+                            background: Rectangle { radius: 8; color: "#292e42"; border.color: "#535970" }
+                            MenuItem { visible: !v.mine && !v.demo; height: visible ? 36 : 0
+                                text: "跟随主持"; checkable: true; checked: v.following; onTriggered: room.preset("") }
+                            Repeater {
+                                model: win.styleNames
+                                MenuItem {
+                                    required property int index; required property string modelData
+                                    objectName: "preset-" + win.styles[index]
+                                    text: modelData; checkable: true; height: 36
+                                    checked: (v.mine || v.demo || !v.following) && v.style === win.styles[index]
+                                    enabled: !v.busy; onTriggered: room.preset(win.styles[index])
+                                }
                             }
                         }
                     }
-                }
-                Item { visible: win.portrait && presets.visible; height: presets.implicitHeight; width: 1 }
-                Column {
-                    width: parent.width; spacing: 3; topPadding: 6
-                    visible: !!v.candidate || !!v.recognitionNotice
-                    Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!v.candidate; text: "耳朵一动"; color: "#d6c4ea"; font.pixelSize: 15 }
-                    Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!text; text: v.candidate; maximumLineCount: 2; wrapMode: Text.Wrap }
-                    Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!text; text: v.recognitionNotice; maximumLineCount: win.portrait && v.candidate ? 1 : 2; wrapMode: Text.Wrap; color: secondary }
+                    Item { visible: win.portrait && presets.visible; height: presets.implicitHeight; width: 1 }
+                    Column {
+                        width: parent.width; spacing: win.valueGap; topPadding: win.portrait ? 2 : 8
+                        visible: !!v.candidate || !!v.recognitionNotice
+                        Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!v.candidate; text: "耳朵一动"; color: "#d6c4ea"; font.pixelSize: win.railLabelSize }
+                        Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!text; text: v.candidate; font.pixelSize: win.railValueSize-1; maximumLineCount: 2; wrapMode: Text.Wrap }
+                        Word { width: parent.width; horizontalAlignment: Text.AlignRight; visible: !!text; text: v.recognitionNotice; font.pixelSize: win.railLabelSize; maximumLineCount: win.portrait && v.candidate ? 1 : 2; wrapMode: Text.Wrap; color: secondary }
+                    }
                 }
             }
             Column {
-                id: signalInfo; objectName: "audioRail"; visible: v.entered; spacing: 5
+                id: signalInfo; objectName: "audioRail"; visible: v.entered; spacing: field.groupGap
                 width: field.railWidth; x: field.width-field.leftRailEnd; y: field.railTop
-                Word { text: v.demo ? "播放音源" : "主持共享"; color: muted; font.pixelSize: 14 }
-                Word { width: parent.width; text: v.shared; font.pixelSize: 18; maximumLineCount: 2; wrapMode: Text.Wrap }
-                Item { width: 1; height: 6 }
-                Word { text: v.mine ? "本机输入" : "本机收听"; color: muted; font.pixelSize: 14 }
-                Word { width: parent.width; text: v.received; font.pixelSize: 18; maximumLineCount: 2; wrapMode: Text.Wrap }
-                Word { width: parent.width; text: "播放延迟约 "+v.delay+" ms"; visible: v.delay>0; color: "#f4ba92" }
-                RoomButton { visible: !v.mine && !v.demo && (v.playing || v.delay>0)
-                    text: "立即同步"; quiet: true; horizontalPadding: 3; implicitHeight: 30; onClicked: room.sync() }
+                RailReading {
+                    id: sharedReading; width: parent.width; height: field.upperRowHeight
+                    caption: v.demo ? "播放音源" : "主持共享"; value: field.formatQuality(v.shared)
+                }
+                Column {
+                    width: parent.width; spacing: win.valueGap
+                    RailReading { width: parent.width; caption: v.mine ? "本机输入" : "本机收听"; value: field.formatQuality(v.received) }
+                    Word { width: parent.width; text: "播放延迟约 "+v.delay+" ms"; visible: v.delay>0; color: "#f4ba92"; font.pixelSize: win.railLabelSize }
+                    RoomButton { visible: !v.mine && !v.demo && (v.playing || v.delay>0)
+                        text: "立即同步"; quiet: true; horizontalPadding: 3; implicitHeight: 30; onClicked: room.sync() }
+                }
             }
         }
 

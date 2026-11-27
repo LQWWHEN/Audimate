@@ -13,17 +13,22 @@ from .room_view import RoomView
 from .window_frame import WindowFrame
 
 
+def player_font_family():
+    directory = Path(__file__).with_name("fonts")
+    for weight in ("Regular", "Bold"):
+        QFontDatabase.addApplicationFont(str(directory / f"NotoSansCJKsc-{weight}.otf"))
+    installed = set(QFontDatabase.families())
+    return next((f for f in ("Noto Sans CJK SC", "Noto Sans SC", "Microsoft YaHei UI", "PingFang SC")
+                 if f in installed), QGuiApplication.font().family())
+
+
 def build_window(model):
     # The disc paints in Python. Keep Qt Quick painting on the GUI thread so
     # synchronous native resize/move events cannot wait on a painter needing the GIL.
     os.environ.setdefault("QSG_RENDER_LOOP", "basic")
     qmlRegisterType(Disc,"Audimate",1,0,"SpectrumDisc")
     engine = QQmlApplicationEngine()
-    families = set(QFontDatabase.families())
-    family = next((f for f in ("Microsoft YaHei UI", "微软雅黑 UI", "Microsoft YaHei",
-                               "PingFang SC", "Noto Sans CJK SC") if f in families),
-                  QGuiApplication.font().family())
-    font = QFont(family)
+    font = QFont(player_font_family())
     font.setPixelSize(16)
     QGuiApplication.setFont(font)
     engine.rootContext().setContextProperty("uiFont", font)
