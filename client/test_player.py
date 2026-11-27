@@ -13,7 +13,7 @@ from wsgiref.simple_server import make_server
 import numpy as np
 from PySide6.QtCore import QObject, QMetaObject, QCoreApplication, QEvent, Qt
 from PySide6.QtTest import QTest
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter
 from PySide6.QtQml import QQmlExpression, qmlContext
 from PySide6.QtQuickControls2 import QQuickStyle
 
@@ -79,6 +79,34 @@ class AnalysisTests(unittest.TestCase):
 
 
 class RoomTests(unittest.TestCase):
+    def test_kick_and_snare_push_the_same_ring_and_respect_reduced_motion(self):
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        app = QGuiApplication.instance() or QGuiApplication([])
+        disc = Disc()
+        disc.timer.stop()
+        disc.setWidth(240)
+        disc.setHeight(240)
+        disc.bands.fill(.5)
+
+        def render(kick, snare):
+            disc.kick, disc.snare = kick, snare
+            image = QImage(240, 240, QImage.Format_ARGB32_Premultiplied)
+            image.fill(QColor("#151827"))
+            painter = QPainter(image)
+            try:
+                disc.paint(painter)
+            finally:
+                painter.end()
+            return image
+
+        rest = render(0, 0)
+        hit = render(1, 0)
+        self.assertNotEqual(rest, hit)
+        self.assertEqual(hit, render(0, 1))
+        self.assertEqual(hit, render(1, 1))
+        disc.reduceMotion(True)
+        self.assertEqual(render(0, 0), render(1, 1))
+
     def test_track_refresh_fits_text_without_moving_the_player(self):
         os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
         QQuickStyle.setStyle("Material")

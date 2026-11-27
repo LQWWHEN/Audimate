@@ -11,9 +11,9 @@ from .spectrum import BANDS
 
 
 ICE = QColor("#9edcf4")
-# amplitude, kick displacement, cover displacement, release seconds
-MOTION = {"heavy": (.35, .13, .045, .085), "pop": (.24, .075, .022, .125),
-          "light": (.13, .020, .004, .24)}
+# Ribbon amplitude, whole-ring displacement, cover displacement, band release seconds.
+MOTION = {"heavy": (.38, .155, .048, .055), "pop": (.33, .115, .030, .075),
+          "light": (.16, .045, .008, .135)}
 
 
 def tint(color, alpha):
@@ -82,15 +82,15 @@ class Disc(QQuickPaintedItem):
         if not self.isVisible():
             return
         stamp, bands, kick, snare = self.analyzer.snapshot if self.analyzer else (0, 0, 0, 0)
-        fresh = now - stamp < .08
+        fresh = now - stamp < .045
         if not fresh and max(self.kick, self.snare, self.bands.max()) < .001 and now - self.fade_start > .65:
             return
         self.motion += (np.array(MOTION[self.style]) - self.motion) * min(1., dt * 8)
         target = bands if fresh else 0
-        self.bands += (target - self.bands) * (1 - np.exp(-dt / np.where(target > self.bands, .017, self.motion[3])))
+        self.bands += (target - self.bands) * (1 - np.exp(-dt / np.where(target > self.bands, .011, self.motion[3])))
         onset = fresh and stamp != self.last_audio
-        self.kick = max(kick if onset else 0, self.kick * math.exp(-dt / .103))
-        self.snare = max(snare if onset else 0, self.snare * math.exp(-dt / .065))
+        self.kick = max(kick if onset else 0, self.kick * math.exp(-dt / .060))
+        self.snare = max(snare if onset else 0, self.snare * math.exp(-dt / .043))
         self.last_audio = stamp
         self.update()
 
@@ -112,11 +112,16 @@ class Disc(QQuickPaintedItem):
         p.setBrush(halo)
         p.drawEllipse(QPointF(), unit, unit)
         base = unit * .68
-        inner = base * (1 + (0 if self.reduced else self.kick*self.motion[1]))
+        # Coincident kick and snare share a single beat, with headroom for the ribbon.
+        beat = 0 if self.reduced else max(self.kick, self.snare)
+        inner = base * (1 + beat*self.motion[1])
         levels = np.r_[self.bands, self.bands[-2:0:-1]]
-        levels = .70 * levels + .15 * (np.roll(levels, 1) + np.roll(levels, -1))
+        levels = .82 * levels + .09 * (np.roll(levels, 1) + np.roll(levels, -1))
         power = .27 if self.reduced else 1.
-        radii = inner + base * (.016 + power * (levels*self.motion[0] + self.snare*self.motion[1]*.42))
+        stroke = max(1.25, unit*.007)
+        rest = inner + base * .016
+        excursion = min(base * self.motion[0], max(0., unit - stroke/2 - rest))
+        radii = rest + power * levels * excursion
         points = [QPointF(x, y) for x,y in zip(self.dx*radii, self.dy*radii)]
         ribbon = QPainterPath((points[-1]+points[0])*.5)
         for i, point in enumerate(points):
@@ -127,12 +132,12 @@ class Disc(QQuickPaintedItem):
         grad.setColorAt(inner/grad.radius(), tint(color, .22))
         grad.setColorAt(1, color.lighter(119))
         p.setBrush(grad)
-        p.setPen(QPen(tint(color, .91), max(1.25, unit*.007)))
+        p.setPen(QPen(tint(color, .91), stroke))
         p.drawPath(ribbon)
         p.setBrush(QColor("#101524"))
         p.setPen(Qt.NoPen)
         p.drawEllipse(QPointF(), inner-1, inner-1)
-        radius = base * .94 * (1 + (0 if self.reduced else self.kick*self.motion[2]))
+        radius = base * .94 * (1 + beat*self.motion[2])
         clip = QPainterPath()
         rect = QRectF(-radius, -radius, radius*2, radius*2)
         clip.addEllipse(rect)
