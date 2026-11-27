@@ -5,6 +5,7 @@ from pathlib import Path
 from PySide6.QtCore import QIODevice, QSaveFile
 
 from host.capture.record import AudioFormat
+from server import spectrum_config
 from .sync import threshold_ms
 
 
@@ -37,6 +38,9 @@ def validate(values):
         raise ValueError("设置值无效。")
     # Room-specific caps are applied when the host requests the stage.
     threshold_ms(data["threshold"], 60000)
+    config = values.get("spectrum", spectrum_config.preset(data["style"]))
+    data["spectrum"] = spectrum_config.validate(config)
+    data["style"] = data["spectrum"]["base"]
     return data
 
 
@@ -48,7 +52,7 @@ def load(path):
             return validate(values)
     except (OSError, ValueError):
         pass
-    return DEFAULTS.copy()
+    return validate(DEFAULTS)
 
 
 def save(path: Path, values):

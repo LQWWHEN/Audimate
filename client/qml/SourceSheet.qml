@@ -14,7 +14,7 @@ Sheet {
     heading: v.host ? "选择音源并申请接替" : "选择要共享的音源"
     function share(source) {
         const p = parameters.values
-        room.requestStage(source.key, p.rate, p.bits, p.codec, p.recognize, p.threshold, p.style)
+        room.requestStage(source.key, p.rate, p.bits, p.codec, p.recognize, p.threshold)
     }
     onOpened: {
         expanded = false

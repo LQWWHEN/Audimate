@@ -6,26 +6,28 @@ import time
 import numpy as np
 
 
-BANDS = 48
-STYLES = ("pop", "heavy", "light")
+from server.spectrum_config import EQ_HZ, preset
+
+BANDS = 96
 
 
-def band_edges(rate):
+def band_edges(rate, start=20, count=BANDS):
     """Give 80–420 Hz a quarter more arc per octave on the mirrored spectrum."""
-    log_hz = np.log([20, 80, 420, min(17000, rate / 2)])
+    log_hz = np.log([start, 80, 420, min(17000, rate / 2)])
     arc = np.r_[0, np.cumsum(np.diff(log_hz) * [1, 1.25, 1])]
-    return np.exp(np.interp(np.linspace(0, arc[-1], BANDS + 1), arc, log_hz))
+    return np.exp(np.interp(np.linspace(0, arc[-1], count + 1), arc, log_hz))
 
 
 class Spectrum(threading.Thread):
-    def __init__(self, rate, bits):
+    def __init__(self, rate, bits, config=None):
         super().__init__(name="Audimate spectrum", daemon=True)
         self.rate, self.bits = rate, bits
         self.chunks = deque(maxlen=12)
         self.ready = threading.Event()
         self.closed = threading.Event()
         self.last_input = 0.0
-        self.snapshot = (0.0, np.zeros(BANDS), 0.0, 0.0)
+        self.requested_config = config or preset()
+        self.snapshot = (0.0, np.zeros(self.requested_config["count"]), 0.0, 0.0)
         size = 1 << round(np.log2(rate * .05))
         self.window = np.hanning(size).astype("f")
         self.fft_scale = (self.window.sum() / 2) ** -2
@@ -34,9 +36,7 @@ class Spectrum(threading.Thread):
         self.hop_bytes = self.hop * 2 * (bits // 8)
         self.remainder = b""
         freqs = np.fft.rfftfreq(size, 1 / rate)
-        edges = band_edges(rate)
-        self.ranges = [(max(1, a), max(2, a + 1, b)) for a, b in
-                       zip(np.searchsorted(freqs, edges[:-1]), np.searchsorted(freqs, edges[1:]))]
+        self.freqs = freqs
         low, body, end = freqs.searchsorted([40, 145, 420])
         self.drum_bins = slice(low, end)
         self.groups = [0, body-low]
@@ -47,13 +47,24 @@ class Spectrum(threading.Thread):
         dt = self.hop / rate
         self.adapt = 1 - np.exp(-dt / .20)
         self.pulse_decay = np.exp(-dt / np.array([.042, .029]))
+        self.config = None
+        self.configure(self.requested_config)
+
+    def configure(self, config):
+        size = len(self.window)
+        edges = band_edges(self.rate, config["start"], config["count"])
+        self.ranges = [(max(1, a), max(2, a + 1, b)) for a, b in
+                       zip(np.searchsorted(self.freqs, edges[:-1]), np.searchsorted(self.freqs, edges[1:]))]
         centers = np.sqrt(edges[:-1] * edges[1:])
-        self.narrow = np.diff(edges) < rate / size
-        bin_position = centers[self.narrow] * size / rate
+        self.narrow = np.diff(edges) < self.rate / size
+        bin_position = centers[self.narrow] * size / self.rate
         self.left_bin = bin_position.astype(int)
         self.bin_fraction = bin_position - self.left_bin
         self.body_weight = np.interp(centers, [20, 45, 320, 600], [.75, 1, 1, 0])
-        self.band_background = np.zeros(BANDS)
+        self.eq_db = np.interp(np.log(centers), np.log(EQ_HZ), config["eq"])
+        if self.config is None or (config["count"], config["start"]) != (self.config["count"], self.config["start"]):
+            self.band_background = np.zeros(config["count"])
+        self.config = config
 
     def feed(self, pcm):
         if not self.closed.is_set():
@@ -91,6 +102,10 @@ class Spectrum(threading.Thread):
             self.analyze_frame(frame)
 
     def analyze_frame(self, frame):
+        # Only the analysis thread rebuilds its band arrays, between whole frames.
+        config = self.requested_config
+        if config is not self.config:
+            self.configure(config)
         self.samples[:-self.hop] = self.samples[self.hop:]
         self.samples[-self.hop:] = frame
         # The 20 Hz bands can interpolate the first FFT bin. Remove channel
@@ -103,7 +118,7 @@ class Spectrum(threading.Thread):
         magnitude = np.sqrt(power[self.drum_bins])
         growth = np.maximum(magnitude - self.previous, 0) / (.016 + .44*self.background)
         flux = np.sqrt(np.add.reduceat(growth**2, self.groups))
-        strength = np.maximum(1.5 * (flux - 2.3*self.flux_floor - .20), 0)
+        strength = np.maximum(config["transient"] * 1.5 * (flux - 2.3*self.flux_floor - .20), 0)
         # A soft knee keeps successive loud hits distinguishable at the rim.
         above_knee = np.maximum(strength - .5, 0)
         attack = np.minimum(strength, .5) + .5 * above_knee / (.5 + above_knee)
@@ -117,14 +132,17 @@ class Spectrum(threading.Thread):
         # Interpolate those centers to avoid duplicating a peak across the arc.
         bands[self.narrow] = (power[self.left_bin] * (1 - self.bin_fraction)
                               + power[self.left_bin + 1] * self.bin_fraction)
-        bands = np.clip((10 * np.log10(bands + 1e-12) + 65) / 58, 0, 1)
+        levels_db = 10 * np.log10(bands + 1e-12)
+        # A 6 dB soft gate on each display band, before the four-point EQ.
+        gate = np.clip((levels_db - config["gate"] + 3) / 6, 0, 1)
+        bands = gate * np.clip((levels_db + self.eq_db + 65) / 58, 0, 1)
         contrast = np.clip(5 * (bands - self.band_background - .025), 0, 1)
         self.band_background += self.adapt * (bands - self.band_background)
         bands = np.clip(bands * (1 - .20*self.body_weight) + .26*self.body_weight*contrast, 0, 1)
         # Preserve the loudest band while lowering the shoulders of each peak.
         # The reference floor keeps quiet passages quiet; silence stays at zero.
         peak = max(.55, bands.max())
-        bands = peak * (bands / peak) ** 1.80
+        bands = peak * (bands / peak) ** config["contrast"]
         neighbors = np.convolve(np.pad(bands, 3, mode="edge"),
                                 [.08, .13, .18, .22, .18, .13, .08], mode="valid")
         bands = np.clip(bands + .60 * (bands - neighbors), 0, peak)

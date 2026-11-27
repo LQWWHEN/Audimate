@@ -14,7 +14,8 @@ from . import local_settings
 from .disc import ICE, demo_art
 from .network import API, AudioListener, AudioUpload, RoomError, default_server
 from .rtc import RTCWorker
-from .spectrum import Spectrum, STYLES
+from .spectrum import Spectrum
+from server import spectrum_config
 from .sync import SyncPolicy, threshold_ms
 
 
@@ -60,7 +61,7 @@ class RoomView(QObject):
         self.view_data = {}
         self.song_info = {}
         self.control_error = ""
-        self.user = self.stream = self.override = self.notice = ""
+        self.user = self.stream = self.notice = ""
         self.cover_url = self.loaded_url = ""
         self.demo = False
         self.want = True
@@ -70,6 +71,8 @@ class RoomView(QObject):
         self.sync_policy = SyncPolicy(time.monotonic())
         self.pref_file = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Audimate" / "desktop.json"
         self.defaults = local_settings.load(self.pref_file)
+        self.profile = self.defaults["spectrum"]
+        self.preview_profile = None
         self.preview_delay = None
         self.receive, self.auto, self.interval = (self.defaults[k] for k in ("receive", "auto", "interval"))
         self.clock = QTimer(self)
@@ -109,12 +112,12 @@ class RoomView(QObject):
         mine = self.state.get("hosting", False)
         pending = self.state.get("pending", False)
         playing = self.analyzer is not None and time.monotonic() - self.analyzer.last_input < 1.5
-        host_style = h.get("visual_style", "pop")
-        style = host_style if mine else self.override or host_style
-        if style not in STYLES:
-            style = "pop"
+        host_profile = self.shared_profile()
+        active = self.preview_profile or self.profile
         if self.disc:
-            self.disc.style = style
+            self.disc.style = active["base"]
+        if self.analyzer:
+            self.analyzer.requested_config = active
         lag = self.listener and self.listener.sync_sample
         lag_ms = lag[1] if lag and time.monotonic()-lag[0] < 5 else None
         receiving = "等待音源" if not h else "正在连接"
@@ -141,7 +144,9 @@ class RoomView(QObject):
                     notice=self.notice or self.control_error, recognitionNotice=info.get("notice") or "",
                     shared=quality(h) if h else "等待音源", received=receiving,
                     delay=round(lag_ms) if lag_ms is not None and lag_ms>1000 else 0,
-                    requests=self.state.get("requests",[]), style=style, following=not self.override,
+                    requests=self.state.get("requests",[]), profile=self.profile,
+                    hostStyle=("custom" if host_profile["custom"] else host_profile["base"]),
+                    sharedProfile=host_profile, fullSpectrum=self.state.get("spectrum_version") == 1,
                     flac=self.state.get("flac",False), rtc=self.state.get("livekit",False),
                     recognize=self.state.get("recognition_available",False), receive=self.receive,
                     auto=self.auto, interval=self.interval, intervals=self.state.get("config",{}).get("intervals",[5, 10, 30]),
@@ -188,7 +193,7 @@ class RoomView(QObject):
 
     def bind_spectrum(self, rate, bits):
         self.clear_spectrum()
-        self.analyzer = Spectrum(rate, bits)
+        self.analyzer = Spectrum(rate, bits, self.preview_profile or self.profile)
         self.analyzer.start()
         self.disc.analyzer = self.analyzer
         return self.analyzer.feed
@@ -420,7 +425,7 @@ class RoomView(QObject):
     @Slot("QVariantMap", result=str)
     def saveDefaults(self, values):
         try:
-            data = local_settings.validate(values)
+            data = local_settings.validate(dict(self.defaults, **values))
             local_settings.save(self.pref_file, data)
         except (OSError, ValueError) as exc:
             return str(exc)
@@ -431,16 +436,72 @@ class RoomView(QObject):
         self.refresh()
         return ""
 
-    @Slot(str)
-    def preset(self, style):
-        if style not in (*STYLES, ""):
-            return
-        if self.state.get("hosting"):
-            if style:
-                self.action("style",dict(visual_style=style,stream=self.stream))
-        else:
-            self.override = style
-            self.refresh()
+    def shared_profile(self):
+        host = self.state.get("host") or {}
+        if "spectrum" in host:
+            try:
+                return spectrum_config.validate(host["spectrum"])
+            except ValueError:
+                pass
+        base = host.get("visual_style")
+        return spectrum_config.preset(base if base in spectrum_config.STYLES else "pop")
+
+    @Slot(str, result="QVariantMap")
+    def spectrumPreset(self, base):
+        return spectrum_config.preset(base if base in spectrum_config.STYLES else "pop")
+
+    @Slot("QVariantMap", result=str)
+    def previewSpectrum(self, values):
+        try:
+            self.preview_profile = spectrum_config.validate(values) if values else None
+        except ValueError as exc:
+            return str(exc)
+        self.refresh()
+        return ""
+
+    @Slot("QVariantMap", bool, result=str)
+    def applySpectrum(self, values, persist):
+        try:
+            profile = spectrum_config.validate(values)
+            if persist:
+                data = local_settings.validate(dict(self.defaults, spectrum=profile))
+                local_settings.save(self.pref_file, data)
+                self.defaults = data
+                self.defaultsChanged.emit()
+        except (ValueError, OSError) as exc:
+            return str(exc)
+        self.profile = profile
+        self.preview_profile = None
+        self.refresh()
+        return ""
+
+    @Slot()
+    def adoptSpectrum(self):
+        if self.state.get("host") and not self.state.get("hosting"):
+            self.applySpectrum(self.shared_profile(), False)
+
+    @Slot("QVariantMap", result=str)
+    def publishSpectrum(self, values):
+        host = self.state.get("host") or {}
+        if self.command or not self.state.get("hosting") or not host.get("stream"):
+            return "当前无法发布，请确认主持身份。"
+        try:
+            profile = spectrum_config.validate(values)
+        except ValueError as exc:
+            return str(exc)
+        payload = dict(visual_style=profile["base"], stream=host["stream"])
+        if self.state.get("spectrum_version") == 1:
+            payload["spectrum"] = profile
+        elif profile["custom"]:
+            return "此服务器仅支持发布内置预设。"
+        previous = self.profile
+        def published(state):
+            self.apply(state)
+            if self.profile is previous and state.get("hosting"):
+                self.profile = profile
+                self.refresh()
+        self.action("style", payload, published)
+        return ""
 
     @Slot()
     def listSources(self):
@@ -450,8 +511,8 @@ class RoomView(QObject):
         self.enumeration = self.pool.submit(list_sources)
         self.refresh()
 
-    @Slot(str,int,int,str,bool,str,str)
-    def requestStage(self,key,rate,bits,codec,recognize,threshold,style):
+    @Slot(str,int,int,str,bool,str)
+    def requestStage(self,key,rate,bits,codec,recognize,threshold):
         if self.command or self.demo or not self.state or self.state["hosting"] or self.state["pending"]:
             return
         from host.capture.record import AudioFormat
@@ -472,7 +533,9 @@ class RoomView(QObject):
         self.source = src
         payload = dict(source=src.name,rate=rate,bits=bits,codec="opus" if codec.startswith("Opus") else "pcm",
                        compression="flac" if codec=="FLAC" else "none",recognize=recognize,
-                       sync_request_ms=value,visual_style=style)
+                       sync_request_ms=value,visual_style=self.profile["base"])
+        if self.state.get("spectrum_version") == 1:
+            payload["spectrum"] = self.profile
         if payload["codec"]=="opus":
             payload["bitrate"] = int(codec.split()[1])*1000
         def requested(state):
@@ -517,7 +580,9 @@ class RoomView(QObject):
     def reset(self):
         self.stop_audio()
         self.generation += 1
-        self.user = self.override = self.notice = self.fallback = ""
+        self.user = self.notice = self.fallback = ""
+        self.profile = self.defaults["spectrum"]
+        self.preview_profile = self.preview_delay = None
         self.cover_url = self.loaded_url = ""
         self.song_info = {}
         self.control_error = ""

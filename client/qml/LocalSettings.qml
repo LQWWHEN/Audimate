@@ -19,6 +19,7 @@ FocusScope {
         section = 0
         delay.value = prefs.delay
         motion.currentIndex = ["system","full","reduced"].indexOf(prefs.motion)
+        editor.draft = roomModel.view.profile
         host.load(prefs)
         receive.currentIndex = prefs.receive === "Opus" ? 0 : 1
         autoSync.checked = prefs.auto
@@ -26,6 +27,7 @@ FocusScope {
         interval.currentIndex = intervalChoices.indexOf(prefs.interval)
     }
     function cancel() {
+        roomModel.previewSpectrum({})
         roomModel.previewDelay(-1)
         finished()
     }
@@ -35,7 +37,9 @@ FocusScope {
             receive: receive.currentIndex === 0 ? "Opus" : "无损 PCM",
             auto: autoSync.checked, interval: intervalChoices[interval.currentIndex]
         })
+        if (!roomModel.view.entered) values.spectrum = editor.draft
         error = roomModel.saveDefaults(values)
+        if (!error) error = roomModel.applySpectrum(editor.draft, false)
         if (!error) cancel()
     }
     Shortcut { sequence: "Escape"; enabled: page.visible; onActivated: page.cancel() }
@@ -44,11 +48,15 @@ FocusScope {
         anchors.topMargin: page.portrait ? 12 : 16; anchors.bottomMargin: 12
         width: Math.min(620, parent.width - (page.portrait ? 32 : 72))
         spacing: 8
-        Word { text: "本地设置"; font.pixelSize: page.portrait ? 28 : 32; font.weight: Font.DemiBold }
         RowLayout {
-            Layout.fillWidth: true; spacing: 16
+            Layout.fillWidth: true
+            Word { text: "本地设置"; Layout.fillWidth: true; font.pixelSize: page.portrait ? 28 : 32; font.weight: Font.DemiBold }
+            Item { id: previewBox; visible: page.showDisc; Layout.preferredWidth: 84; Layout.preferredHeight: 72 }
+        }
+        RowLayout {
+            Layout.fillWidth: true; spacing: page.portrait ? 4 : 12
             Repeater {
-                model: ["音画校准", "主持默认值", "收听偏好"]
+                model: ["频谱配置", "主持默认值", "收听偏好"]
                 AbstractButton {
                     id: tab; required property string modelData; required property int index
                     objectName: "section"+index; text: modelData
@@ -75,6 +83,14 @@ FocusScope {
                 width: parent.width; spacing: 10
                 ColumnLayout {
                     visible: page.section === 0; Layout.fillWidth: true; spacing: 8
+                    SpectrumEditor {
+                        id: editor; objectName: "spectrumEditor"; Layout.fillWidth: true
+                        roomModel: page.roomModel
+                        onEdited: page.error = roomModel.previewSpectrum(draft)
+                    }
+                    Word { visible: page.roomModel.view.mine && !page.roomModel.view.fullSpectrum
+                        text: "当前服务器仅共享基础预设"; font.pixelSize: 14 }
+                    Rectangle { Layout.fillWidth: true; implicitHeight: 1; color: "#353b50" }
                     RowLayout {
                         Layout.fillWidth: true; Layout.topMargin: 10
                         ColumnLayout {
@@ -86,7 +102,7 @@ FocusScope {
                                 Word { text: "ms"; color: "#b4cfe5"; font.pixelSize: 20; Layout.alignment: Qt.AlignBaseline }
                             }
                         }
-                        Item { id: previewBox; visible: page.showDisc; Layout.preferredWidth: 110; Layout.preferredHeight: 100 }
+
                     }
                     Slider { id: delay; objectName: "playbackDelay"; Layout.fillWidth: true
                         from: 0; to: 200; stepSize: 5; snapMode: Slider.SnapAlways; Accessible.name: "本机播放延迟（毫秒）"
@@ -122,12 +138,28 @@ FocusScope {
                 }
             }
         }
-        Word { visible: !!page.error; text: page.error; Layout.fillWidth: true; wrapMode: Text.Wrap; color: "#f4ba92" }
+        RowLayout {
+            Layout.fillWidth: true; visible: page.section === 0 && page.roomModel.view.entered
+            Item { Layout.fillWidth: true }
+            RoomButton { objectName: "storeSpectrumDefault"; text: "存为本机默认"; visible: page.roomModel.view.entered
+                onClicked: {
+                    const message = page.roomModel.applySpectrum(editor.draft, true)
+                    page.error = message || "已存为本机默认"
+                }
+            }
+            RoomButton { objectName: "publishSpectrum"; visible: page.roomModel.view.mine
+                property bool published: JSON.stringify(page.roomModel.view.sharedProfile) === JSON.stringify(editor.draft)
+                text: published ? "已发布到房间" : "发布到房间"
+                enabled: !published && !page.roomModel.view.busy
+                onClicked: page.error = page.roomModel.publishSpectrum(editor.draft)
+            }
+        }
+        Word { visible: !!text; text: page.error || page.roomModel.view.notice; Layout.fillWidth: true; wrapMode: Text.Wrap; color: "#f4ba92" }
         RowLayout {
             Layout.fillWidth: true; spacing: 10
             Item { Layout.fillWidth: true }
             RoomButton { text: "取消"; quiet: true; onClicked: page.cancel() }
-            RoomButton { text: "保存并返回"; objectName: "saveDefaults"; primary: true; onClicked: page.save() }
+            RoomButton { text: page.roomModel.view.entered ? "应用并返回" : "存为本机默认"; objectName: "saveDefaults"; primary: true; onClicked: page.save() }
         }
     }
 }

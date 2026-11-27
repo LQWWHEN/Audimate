@@ -49,12 +49,10 @@ class Disc(QQuickPaintedItem):
         self.analyzer = None
         self.style = "pop"
         self.motion = np.array(MOTION["pop"])
-        self.bands = np.zeros(BANDS)
         self.kick = self.snare = 0.
         self.last_tick = time.monotonic()
         self.last_audio = 0
-        self.angle = np.linspace(0, math.pi * 2, 2 * (BANDS - 1), endpoint=False)
-        self.dx, self.dy = np.sin(self.angle), -np.cos(self.angle)
+        self.set_band_count(BANDS)
         self.art = self.old_art = QImage()
         self.accent = self.old_accent = ICE
         self.fade_start = 0
@@ -63,6 +61,11 @@ class Disc(QQuickPaintedItem):
         self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self.advance)
         self.timer.start(16)
+
+    def set_band_count(self, count):
+        self.bands = np.zeros(count)
+        self.angle = np.linspace(0, math.pi * 2, 2 * (count - 1), endpoint=False)
+        self.dx, self.dy = np.sin(self.angle), -np.cos(self.angle)
 
     def artwork(self, img, color):
         self.old_art, self.art = self.art, img
@@ -86,6 +89,8 @@ class Disc(QQuickPaintedItem):
         if not fresh and max(self.kick, self.snare, self.bands.max()) < .001 and now - self.fade_start > .65:
             return
         self.motion += (np.array(MOTION[self.style]) - self.motion) * min(1., dt * 8)
+        if fresh and self.analyzer and len(bands) != len(self.bands):
+            self.set_band_count(len(bands))
         target = bands if fresh else 0
         self.bands += (target - self.bands) * (1 - np.exp(-dt / np.where(target > self.bands, .011, self.motion[3])))
         onset = fresh and stamp != self.last_audio
