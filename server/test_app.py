@@ -97,6 +97,25 @@ class Integration(unittest.TestCase):
         with self.assertRaisesRegex(OSError, "409"):
             self.alice.request(path, wire)
 
+    def test_visual_style_is_owned_by_each_publishing_round(self):
+        self.register(self.alice, "主持")
+        self.register(self.bob, "听众")
+        a = self.alice.request("stage/request", self.choice)["host"]
+        self.assertEqual(a["visual_style"], "pop")
+        change = {"stream": a["stream"], "visual_style": "heavy"}
+        with self.assertRaisesRegex(OSError, "403"):
+            self.bob.request("stage/style", change)
+        self.alice.request("stage/style", change)
+        self.assertEqual(self.bob.request("room")["host"]["visual_style"], "heavy")
+        with self.assertRaisesRegex(OSError, "400"):
+            self.alice.request("stage/style", dict(change, visual_style="invalid"))
+        self.bob.request("stage/request", dict(self.choice, visual_style="light"))
+        req = self.alice.request("room")["requests"][0]
+        state = self.alice.request("stage/accept", dict(stream=a["stream"], id=req["id"]))
+        self.assertEqual(state["host"]["visual_style"], "light")
+        with self.assertRaisesRegex(OSError, "409"):
+            self.alice.request("stage/style", change)
+
     def test_handoff_and_audio(self):
         self.register(self.alice, "主持甲")
         self.register(self.bob, "主持乙")

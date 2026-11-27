@@ -1,4 +1,5 @@
 """Per-listener automatic alignment, timed by fresh playback samples."""
+import math
 
 
 class SyncPolicy:
@@ -36,3 +37,16 @@ class SyncPolicy:
         self.high_since = None
         self.attempts = min(6, self.attempts + 1)
         return True
+
+
+def threshold_ms(text, cap):
+    text = text.strip()
+    if text in ("", "跟随房间"):
+        return None
+    try:
+        seconds = float(text)
+        if math.isfinite(seconds) and 0 <= seconds <= cap / 1000:
+            return round(seconds * 1000)
+    except ValueError:
+        pass
+    raise ValueError(f"阈值范围 0–{cap / 1000:g} 秒")

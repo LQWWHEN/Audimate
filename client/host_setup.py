@@ -1,5 +1,5 @@
 """Process and upload settings for an online hosting request."""
-import math
+from .sync import threshold_ms
 import tkinter as tk
 from tkinter import ttk
 
@@ -9,19 +9,6 @@ from .processes import list_sources
 
 def format_label(fmt):
     return f"{fmt.sample_rate / 1000:g} kHz · {fmt.bits_per_sample}-bit"
-
-
-def threshold_ms(text, cap):
-    text = text.strip()
-    if text in ("", "跟随房间"):
-        return None
-    try:
-        seconds = float(text)
-        if math.isfinite(seconds) and 0 <= seconds <= cap / 1000:
-            return round(seconds * 1000)
-    except ValueError:
-        pass
-    raise ValueError(f"阈值范围 0–{cap / 1000:g} 秒")
 
 
 class HostSetup(ttk.Frame):

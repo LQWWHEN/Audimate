@@ -1,10 +1,6 @@
 """Start the Windows music room with python -m client."""
 import argparse
 from pathlib import Path
-import tkinter as tk
-from tkinter import ttk
-
-from .online import OnlineRoom
 
 
 DEFAULT_DLL = Path(__file__).resolve().parents[1] / "build" / "Release" / "audimate_capture.dll"
@@ -15,7 +11,15 @@ PAPER, INK, MUTED, ACCENT = "#f6f7f9", "#1c2935", "#526270", "#006c60"
 def main(*, development=False):
     parser = argparse.ArgumentParser(description="Audimate 在线音乐房间")
     parser.add_argument("--dll", type=Path, default=DEFAULT_DLL, help="采音 DLL 路径")
+    parser.add_argument("--demo", action="store_true", help="直接试听本地合成曲目与频谱")
+    parser.add_argument("--legacy", action="store_true", help="使用初版 Tk 界面")
     args = parser.parse_args()
+    if not args.legacy:
+        from .desktop import launch
+        return launch(args.dll, development, args.demo)
+    import tkinter as tk
+    from tkinter import ttk
+    from .online import OnlineRoom
     root = tk.Tk()
     style = ttk.Style(root)
     style.theme_use("clam")

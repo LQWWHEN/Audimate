@@ -69,9 +69,15 @@ class RTCWorker(threading.Thread):
             stream = rtc.AudioStream.from_track(track=track, sample_rate=48000, num_channels=2, capacity=30, frame_size_ms=20)
             try:
                 with Output(48000, 16) as output:
+                    output.observe = getattr(self, "observe", None)
                     async for event in stream:
                         with timed(self.timing if self.api.timing else None, "output", "device_ms"):
-                            await asyncio.to_thread(output.write, bytes(event.frame.data.cast("B")))
+                            write = asyncio.create_task(asyncio.to_thread(output.write, bytes(event.frame.data.cast("B"))))
+                            try:
+                                await asyncio.shield(write)
+                            finally:
+                                # Cancellation must not close the device during a native write.
+                                await write
             finally:
                 await stream.aclose()
 

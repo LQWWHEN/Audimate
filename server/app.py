@@ -75,6 +75,12 @@ def fields(env):
     return data
 
 
+def visual_style(value):
+    if value not in ("pop", "heavy", "light"):
+        raise Problem(400, "未知的可视化预设")
+    return value
+
+
 class Room:
     def __init__(self, development=False, room_id="main", *, audio_block_ms=200):
         self.room_id = room_id
@@ -317,6 +323,7 @@ class Room:
                 raise Problem(400, "不支持所选 Opus 码率")
             choice = dict(name=name, rate=rate, bits=bits, source=label.strip(), codec=codec, compression=compression,
                           channels=2, bitrate=bitrate if codec == "opus" else rate * bits * 2, id=secrets.token_hex(8))
+            choice["visual_style"] = visual_style(data.get("visual_style", "pop"))
             value = data.get("sync_request_ms")
             choice["recognize"] = data.get("recognize", False)
             if type(choice["recognize"]) is not bool or choice["recognize"] and not self.can_recognize():
@@ -336,6 +343,12 @@ class Room:
                 raise Problem(400, "缺少阈值")
             value = data["sync_request_ms"]
             self.host["sync_request_ms"] = None if value is None else sync_ms(value)
+        elif action == "style":
+            if not self.host or self.host["stream"] != data.get("stream"):
+                raise Problem(409, "主持已变更")
+            if self.host["key"] != key:
+                raise Problem(403, "仅主持可调整房间预设")
+            self.host["visual_style"] = visual_style(data.get("visual_style"))
         elif action == "track":
             if not self.host or self.host["stream"] != data.get("stream"):
                 raise Problem(409, "主持已变更")
@@ -595,7 +608,7 @@ class App:
             data = fields(env)
         room_read = path == "/api/room" and method == "GET"
         stage_write = path in ("/api/stage/request", "/api/stage/leave", "/api/stage/accept",
-                               "/api/stage/reject", "/api/stage/track", "/api/stage/sync") and method == "POST"
+                               "/api/stage/reject", "/api/stage/track", "/api/stage/sync", "/api/stage/style") and method == "POST"
         audio_request = path == "/api/audio" and method in ("GET", "POST")
         media_request = path in ("/api/media", "/api/diagnostics") and method == "POST"
         clock_read = path == "/api/clock" and method == "GET"
