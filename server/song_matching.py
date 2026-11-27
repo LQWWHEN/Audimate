@@ -107,6 +107,21 @@ def artist_similarity(left, right):
     return total / max(len(left), len(right), 1)
 
 
+def appended_han_artist(left, right):
+    """Check one bilingual credit after accounting for all other artists."""
+    left_only, right_only = left - right, right - left
+    if len(left_only) != 1 or len(right_only) != 1:
+        return False
+    names = (name.replace("’", "'") for name in left_only | right_only)
+    plain, bilingual = sorted(names, key=len)
+    if scripts(plain) != {"LATIN"} or sum(c.isalpha() for c in plain) <= 3 or not bilingual.startswith(plain):
+        return False
+    suffix = bilingual[len(plain):].strip()
+    if suffix.startswith("(") and suffix.endswith(")"):
+        suffix = suffix[1:-1].strip()
+    return len(suffix) >= 2 and all(unicodedata.name(c, "").startswith("CJK UNIFIED IDEOGRAPH-") for c in suffix)
+
+
 @dataclass
 class Credits:
     left_title: str
@@ -142,7 +157,9 @@ class Credits:
         a, b = folded(self.left_title), folded(self.right_title)
         if not a or not b or (min(len(a), len(b)) <= 3 and self.left_title != self.right_title):
             return "", "短曲名需要完全吻合"
-        if scripts(a) != scripts(b) or scripts("".join(self.left_artists)) != scripts("".join(self.right_artists)):
+        alias = self.left_title == self.right_title and appended_han_artist(self.left_artists, self.right_artists)
+        if not alias and (scripts(a) != scripts(b) or
+                          scripts("".join(self.left_artists)) != scripts("".join(self.right_artists))):
             return "", "跨文字名称须核实目录"
         # Long matching qualifiers must not conceal an unrelated short main title.
         main_a, main_b = (folded(_QUALIFIER.sub("", text)) for text in (self.left_title, self.right_title))
@@ -151,8 +168,10 @@ class Credits:
         title = similarity(a, b)
         if main_a and main_b:
             title = min(title, similarity(main_a, main_b))
-        artists = artist_similarity(self.left_artists, self.right_artists)
+        artists = 1.0 if alias else artist_similarity(self.left_artists, self.right_artists)
         note = f"模糊核对 · 歌名 {title:.3f} · 艺人 {artists:.3f}"
+        if alias:
+            note += " · 完整拉丁艺名吻合，附加汉字艺名"
         if title >= policy["recognition_title_min"] and artists >= policy["recognition_artist_min"]:
             return "fuzzy", note
         return "", note + " · 未达门槛"

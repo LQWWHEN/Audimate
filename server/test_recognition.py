@@ -81,6 +81,35 @@ class RecognitionTests(unittest.TestCase):
         self.assertIn("1/2", self.replay(track)["detail"])
         self.assertIsNone(self.status()["recognition"]["current"])
 
+    def test_bilingual_artist_label_requires_two_full_hits(self):
+        player = "Jo's Moving Day乔迁日"
+        track = dict(id="585385670", title="1968 Itinerary", artist="Jo’s Moving Day", album="Itinerary")
+        state = self.player(track["title"], player)
+        with patch.object(recognition, "localized_names", AsyncMock(return_value=None)):
+            for quick, progress in ((True, "0/2"), (False, "1/2"), (False, "2/2")):
+                detail = self.replay(track, quick)["detail"]
+                self.assertIn(progress, detail)
+                self.assertIn("附加汉字艺名", detail)
+                self.assertEqual(state.current, track if progress == "2/2" else None)
+        self.assertEqual(self.status()["source"], "1968 Itinerary - " + player)
+        self.assertIn("模糊兜底采用", detail)
+
+    def test_bilingual_artist_label_guards(self):
+        plain = "Jo’s Moving Day"
+        mixed = "Jo's Moving Day乔迁日"
+        def decision(a, b, *, title="1968 Itinerary", fuzzy=True):
+            credits = recognition.Credits.compare(dict(title="1968 Itinerary", artist=a),
+                                                  dict(title=title, artist=b), recognition.SUFFIX_FILE.read())
+            return credits.fallback(dict(DEFAULT, recognition_fuzzy=fuzzy))[0]
+        self.assertEqual(decision("Guest & Jo's Moving Day（乔迁日）", plain + " & Guest"), "fuzzy")
+        for artist in ("乔迁日", "Jo's Moving Days乔迁日", "Jo's Moving Day / 乔迁日",
+                       mixed + " & Guest", mixed + " (feat. Guest)"):
+            with self.subTest(artist=artist):
+                self.assertFalse(decision(plain, artist))
+        self.assertFalse(decision(plain, mixed, title="1968 Itinerari"))
+        self.assertFalse(decision(plain, mixed, title="1968 Itinerary (Live)"))
+        self.assertFalse(decision(plain, mixed, fuzzy=False))
+
     def test_partial_creds_and_fuzzy_guards(self):
         state = self.player("Long Artist Collaboration", "Alice")
         track = dict(id="1", title="Long Artist Collaboration (ft. Bob)", artist="Alice")
