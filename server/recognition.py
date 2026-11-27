@@ -2,6 +2,7 @@
 import asyncio
 from importlib.util import find_spec
 import io
+import re
 import threading
 import time
 import unicodedata
@@ -11,15 +12,87 @@ import wave
 WINDOW_S = 12
 QUICK_S = 5
 QUERY_TIMEOUT_S = 8
+CATALOG_TIMEOUT_S = 3
 AVAILABLE = find_spec("shazamio") is not None
+
+# A mastering credit can be absent on one storefront. Other version labels are significant.
+_REMASTER = r"(?:(?:19|20)[0-9]{2}\s+)?remaster(?:ed)?(?:\s+(?:19|20)[0-9]{2})?"
+_REMASTER_SUFFIX = re.compile(rf"(?:\s*\({_REMASTER}\)|\s*\[{_REMASTER}\]|\s+[-–—]\s*{_REMASTER})$")
+_KANA = re.compile(r"[\u3041-\u3096\u30a1-\u30fa]")
+_HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\U00020000-\U0002fa1f]")
 
 
 def normalize(text):
     return " ".join(unicodedata.normalize("NFKC", text).casefold().split())
 
 
-def matches_title(track, title):
-    return all(normalize(track[k]) == normalize(title[k]) for k in ("title", "artist"))
+def song_title_match(left, right):
+    left, right = normalize(left), normalize(right)
+    if left == right:
+        return "exact"
+
+    def mastering(text):
+        suffix = _REMASTER_SUFFIX.search(text)
+        if not suffix:
+            return text, None
+        return text[:suffix.start()].rstrip(), re.search(r"[0-9]{4}", suffix[0])
+    left_name, left_year = mastering(left)
+    right_name, right_year = mastering(right)
+    if left_name and left_name == right_name and not (left_year and right_year and left_year[0] != right_year[0]):
+        return "remaster"
+    return ""
+
+
+def title_agreement(track, title):
+    if normalize(track["artist"]) != normalize(title["artist"]):
+        return ""
+    return song_title_match(track["title"], title["title"])
+
+
+def catalog_locales(title, match):
+    names = normalize(title["title"] + " " + title["artist"])
+    if _KANA.search(names):
+        return (("ja-JP", "JP"),)
+    if _HAN.search(names):
+        return (("zh-CN", "CN"), ("zh-TW", "TW"), ("ja-JP", "JP"))
+    returned = normalize(match["title"] + " " + match["artist"])
+    if _KANA.search(returned) or _HAN.search(returned):
+        return (("en-US", "US"),)
+    return ()
+
+
+async def localized_names(key, language, country):
+    from shazamio import Shazam
+    async with Shazam(language=language, endpoint_country=country) as service:
+        record = await service.track_about(int(key))
+    if (isinstance(record, dict) and str(record.get("key")) == key and
+            all(isinstance(record.get(k), str) and record[k].strip() for k in ("title", "subtitle"))):
+        return dict(title=record["title"], artist=record["subtitle"])
+    return None
+
+
+async def check_catalog(track, player, locales, deadline):
+    artist = normalize(player["artist"])
+    artist_ok = normalize(track["artist"]) == artist
+    title_ok = bool(song_title_match(track["title"], player["title"]))
+    problem = None
+    for index, (language, country) in enumerate(locales):
+        # Reserve time for another storefront when the first one is slow or unavailable.
+        timeout = (deadline - time.monotonic()) / (len(locales) - index)
+        try:
+            alias = await asyncio.wait_for(localized_names(track["id"], language, country), timeout)
+        except Exception as exc:
+            problem = type(exc).__name__
+            continue
+        if not alias:
+            continue
+        artist_ok = artist_ok or normalize(alias["artist"]) == artist
+        title_ok = title_ok or bool(song_title_match(alias["title"], player["title"]))
+        if artist_ok and title_ok:
+            return "localized", "同一 Shazam ID 的本地化曲名与歌手吻合", 120
+    if problem:
+        return "", f"本地化目录暂未核实（{problem}）", 30
+    return "", "本地化目录无匹配", 120
 
 
 def cover_url(value):
@@ -120,14 +193,18 @@ class Recognition:
         self.last_start = 0
         self.current = self.candidate = None
         self.notice = ""
+        self.last_catalog = None
 
     def view(self):
         return dict(current=self.current, candidate=self.candidate if not self.title else None, notice=self.notice)
 
-    def receive(self, match, quick):
+    def receive(self, match, quick, agreement=None):
         self.notice = ""
-        if self.title and match and not matches_title(match, self.title):
-            match = None
+        if self.title and match:
+            if agreement is None:
+                agreement = title_agreement(match, self.title)
+            if not agreement:
+                match = None
         if quick:
             if match:
                 self.current = match
@@ -140,6 +217,30 @@ class Recognition:
             if self.candidate:
                 self.current = None
             self.candidate = match
+
+    async def query(self, wav, trace):
+        deadline = time.monotonic() + QUERY_TIMEOUT_S
+        match = await identify(wav, trace)
+        if not match or not self.title:
+            return match, "", ""
+        agreement = title_agreement(match, self.title)
+        if agreement:
+            return match, agreement, "母带版本标记等价" if agreement == "remaster" else ""
+        locales = catalog_locales(self.title, match)
+        key = match["id"]
+        if not locales or not re.fullmatch(r"[0-9]{1,20}", key):
+            return match, "", ""
+        if self.last_catalog:
+            prior, expires, reason, note = self.last_catalog
+            if prior == key and expires > time.monotonic():
+                return match, reason, note + " · 复用目录核对"
+
+        # Only one worker uses this Recognition. Its cache expires with the player title.
+        # The optional catalog check shares the original deadline and never discards a fingerprint hit.
+        start = time.monotonic()
+        reason, note, ttl = await check_catalog(match, self.title, locales, min(start + CATALOG_TIMEOUT_S, deadline))
+        self.last_catalog = (key, time.monotonic()+ttl, reason, note)
+        return match, reason, f"{note} · 目录核对 {round((time.monotonic()-start)*1000)} ms"
 
     def schedule(self, room, rate, width):
         # Called under the room lock, once per appended block. No PCM copies or IO here.
@@ -184,8 +285,9 @@ class Recognition:
         started = time.monotonic()
         note = error = ""
         match = None
+        agreement = evidence = ""
         try:
-            match = asyncio.run(identify(encode_window(parts, rate, width, quick), trace))
+            match, agreement, evidence = asyncio.run(self.query(encode_window(parts, rate, width, quick), trace))
             outcome = "命中" if match else "未匹配"
         except asyncio.TimeoutError as exc:
             outcome, note = "超时", "识别超时，稍后重试"
@@ -203,7 +305,7 @@ class Recognition:
             if note:
                 self.notice = note
             else:
-                self.receive(match, quick)
+                self.receive(match, quick, agreement)
             if trace and (monitor.level == "debug" or (error and monitor.level == "errors")):
                 mode = "Quick Fetch" if quick else "完整窗口"
                 summary = f"{mode} · {outcome} · {round((finished-started)*1000)} ms"
@@ -212,7 +314,7 @@ class Recognition:
                     details.extend((error, f"{trace.stage} {round((finished-trace.since)*1000)} ms"))
                 elif match:
                     summary += f" · {match['title']} - {match['artist']}"
-                    if self.title and not matches_title(match, self.title):
+                    if self.title and not agreement:
                         decision = "与播放器标题不符，未采用"
                     elif self.current and self.current["id"] == match["id"]:
                         decision = "已确认"
@@ -220,5 +322,7 @@ class Recognition:
                         decision = "候选，等待二次确认"
                     details.extend((decision, "Shazam ID " + match["id"]))
                     details.extend(match[k] for k in ("album", "released") if match.get(k))
-                details.append(trace.http_summary())
+                    if evidence:
+                        details.append(evidence)
+                details.append("指纹查询 " + trace.http_summary())
                 monitor.event("识别", summary, detail=" · ".join(details), error=bool(error))

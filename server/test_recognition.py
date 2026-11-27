@@ -1,3 +1,4 @@
+import asyncio
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import threading
@@ -62,6 +63,71 @@ class RecognitionTests(unittest.TestCase):
         self.title("B")
         self.assertIsNone(self.room.recognition.current)
         self.assertEqual(self.status()["source"], "B - Artist")
+
+    def test_mastering_labels_preserve_identity_and_display(self):
+        base = "Stairway to Heaven"
+        artist = "Led Zeppelin"
+        result = dict(id="1", title=base, artist=artist, album="IV")
+        for suffix in ("(Remastered)", "（2014 Remaster）", " - Remastered 2014", " [Remastered]"):
+            title = dict(title=base+suffix, artist=artist)
+            self.room.action("k", "Alice", "track", dict(stream=self.stream, track=title))
+            with patch.object(recognition, "identify", AsyncMock(return_value=result)), patch.object(recognition, "localized_names") as lookup:
+                self.room.recognition.run(self.room, [], 8000, 2, True)
+                lookup.assert_not_called()
+            self.assertEqual(self.status()["source"], title["title"]+" - "+artist)
+            self.assertEqual(self.status()["recognition"]["current"], result)
+            self.assertIn("母带版本标记等价", self.room.monitor.events[0]["detail"])
+        for suffix in ("(Live)", "(Remix)", "(Acoustic)", "(Demo)", "(Instrumental)", "(Part II)"):
+            self.assertFalse(recognition.song_title_match(base+suffix, base))
+        self.assertFalse(recognition.song_title_match("A (2014 Remaster)", "A (1990 Remaster)"))
+        self.assertFalse(recognition.title_agreement(result, dict(title=base+"(Remastered)", artist="Tribute Band")))
+
+    def test_localized_confirmation_and_cache(self):
+        player = dict(title="モルヒネ", artist="椎名林檎")
+        track = dict(id="40368919", title="Morphine", artist="Sheena Ringo", album="Muzai Moratorium")
+        self.room.action("k", "Alice", "track", dict(stream=self.stream, track=player))
+        state = self.room.recognition
+        with patch.object(recognition, "identify", AsyncMock(return_value=track)), patch.object(
+                recognition, "localized_names", AsyncMock(return_value=player)) as lookup:
+            state.run(self.room, [], 8000, 2, False)
+            self.assertIsNone(self.status()["recognition"]["current"])
+            self.assertIn("候选", self.room.monitor.events[0]["detail"])
+            state.run(self.room, [], 8000, 2, False)
+            lookup.assert_awaited_once_with("40368919", "ja-JP", "JP")
+        self.assertEqual(self.status()["source"], "モルヒネ - 椎名林檎")
+        self.assertEqual(self.status()["recognition"]["current"], track)
+        self.assertIn("复用目录核对", self.room.monitor.events[0]["detail"])
+        self.assertIn("Morphine - Sheena Ringo", self.room.monitor.events[0]["message"])
+
+    def test_chinese_catalog_fallback_and_artist_check(self):
+        track = dict(id="100", title="English Title", artist="English Artist")
+        player = dict(title="歌名", artist="藝人")
+        state = recognition.Recognition(0, player)
+        with patch.object(recognition, "identify", AsyncMock(return_value=track)), patch.object(
+                recognition, "localized_names", AsyncMock(side_effect=[TimeoutError(), player])) as lookup:
+            self.assertEqual(asyncio.run(state.query(b"", None))[1], "localized")
+            self.assertEqual([call.args[1] for call in lookup.await_args_list], ["zh-CN", "zh-TW"])
+        for alias in (dict(title="另一首歌", artist="藝人"), dict(title="歌名", artist="其他歌手"), None):
+            state = recognition.Recognition(0, player)
+            with patch.object(recognition, "identify", AsyncMock(return_value=track)), patch.object(
+                    recognition, "localized_names", AsyncMock(return_value=alias)):
+                self.assertFalse(asyncio.run(state.query(b"", None))[1])
+
+    @unittest.skipUnless(recognition.AVAILABLE, "requires ShazamIO")
+    def test_catalog_rejects_different_id_and_survives_timeout(self):
+        wrong = dict(key="99", title="モルヒネ", subtitle="椎名林檎")
+        with patch("shazamio.Shazam.track_about", AsyncMock(return_value=wrong)):
+            self.assertIsNone(asyncio.run(recognition.localized_names("40368919", "ja-JP", "JP")))
+        state = recognition.Recognition(0, dict(title="モルヒネ", artist="椎名林檎"))
+        track = dict(id="40368919", title="Morphine", artist="Sheena Ringo")
+        with patch.object(recognition, "identify", AsyncMock(return_value=track)), patch.object(
+                recognition, "localized_names", AsyncMock(side_effect=TimeoutError())) as lookup:
+            for _ in range(2):
+                raw, agreement, evidence = asyncio.run(state.query(b"", None))
+                self.assertIs(raw, track)
+                self.assertFalse(agreement)
+                self.assertIn("TimeoutError", evidence)
+            lookup.assert_awaited_once()
 
     def test_ops_reports_provider_match_and_acceptance_separately(self):
         self.title("B")
