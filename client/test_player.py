@@ -23,11 +23,44 @@ from server.test_app import Quiet
 from .desktop import build_window
 from .disc import Disc
 from .room_view import RoomView
+from . import local_settings
+from .playback import Output
 from .spectrum import Spectrum
 from .__main__ import DEFAULT_DLL
 
 
 class AnalysisTests(unittest.TestCase):
+    def test_live_calibration_preserves_samples_across_delay_changes(self):
+        for rate,bits in ((48000,16),(44100,24),(96000,32)):
+            with self.subTest(rate=rate,bits=bits), patch("sounddevice.RawOutputStream") as factory:
+                device = factory.return_value
+                device.write.return_value = False
+                observed = []
+                with Output(rate,bits) as output:
+                    output.observe = observed.append
+                    chunk = bytes((i % 253 + 1 for i in range(output.frame_bytes)))
+                    output.playback_delay = lambda: 50
+                    output.write(chunk*4)
+                    out = b"".join(c.args[0] for c in device.write.call_args_list)
+                    silence = bytes(round(rate*.05)*2*(bits//8))
+                    self.assertEqual(out, (silence+chunk*4)[:len(chunk)*4])
+                    output.playback_delay = lambda: 0
+                    output.write(chunk)
+                    self.assertEqual(b"".join(c.args[0] for c in device.write.call_args_list), silence+chunk*5)
+                    self.assertEqual(b"".join(observed),chunk*5)
+
+    def test_settings_migrate_validate_and_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp)/"desktop.json"
+            path.with_name("listening.json").write_text('{"interval":10,"auto":false}',encoding="utf8")
+            prefs = local_settings.load(path)
+            self.assertEqual((prefs["delay"],prefs["interval"],prefs["auto"]),(50,10,False))
+            with self.assertRaises(ValueError):
+                local_settings.validate(dict(prefs,rate=44133))
+            prefs = local_settings.validate(dict(prefs,rate=88200.,bits=24,delay=0))
+            local_settings.save(path,prefs)
+            self.assertEqual(local_settings.load(path),prefs)
+
     def test_stereo_opposition_and_supported_formats(self):
         for rate, bits in ((8000,16), (44100,24), (48000,16), (96000,32), (192000,24)):
             analyzer = Spectrum(rate,bits)
@@ -83,6 +116,7 @@ class RoomTests(unittest.TestCase):
                 model.login(url,name,"test-player-password",True)
             wait(lambda: a.state and b.state)
             self.assertTrue(a.want and b.want)
+            self.assertEqual(a.saveDefaults(dict(a.localDefaults,codec=codec,style="heavy",receive=a.receive)), "")
             sheet = window.findChild(QObject,"sourceSheet")
             self.assertTrue(QMetaObject.invokeMethod(sheet,"open"))
             wait(lambda: a.items)
@@ -90,8 +124,17 @@ class RoomTests(unittest.TestCase):
             wait(lambda: b.items)
             for model,style in ((a,"heavy"),(b,"pop")):
                 key = next(row["key"] for row in model.items if row["pid"]==proc.pid)
-                model.requestStage(key,48000,16,codec,False,"",style)
                 if model is a:
+                    window.findChild(QObject,"sourceSearch").setProperty("text",str(proc.pid))
+                    def share_button():
+                        nodes = [window.contentItem()]
+                        while nodes:
+                            node = nodes.pop()
+                            if node.objectName() == "share-"+key:
+                                return node
+                            nodes.extend(node.childItems())
+                    wait(share_button)
+                    self.assertTrue(QMetaObject.invokeMethod(share_button(),"click"))
                     wait(lambda: b.view["playing"] and b.view["style"]=="heavy")
                     wait(lambda: b.analyzer.snapshot[1].max()>.3)
                     self.assertTrue(a.capture and a.view["mine"])
@@ -125,6 +168,8 @@ class RoomTests(unittest.TestCase):
                     QTest.mouseClick(window, Qt.LeftButton, Qt.NoModifier, point)
                     wait(lambda: b.state["host"]["visual_style"]=="pop")
                     self.assertEqual(b.view["style"],"light")
+                else:
+                    model.requestStage(key,48000,16,codec,False,"",style)
             wait(lambda: a.view["requests"] and b.view["pending"])
             self.assertTrue(b.listener and not b.capture)
             a.decide("accept",a.view["requests"][0]["id"])

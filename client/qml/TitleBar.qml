@@ -9,6 +9,7 @@ Rectangle {
     readonly property var v: model.view
     height: shell.portrait ? 48 : 56
     color: "#181b2c"
+    function focusSettings() { localButton.forceActiveFocus() }
     function toggleMax() {
         if (shell.visibility === Window.Maximized) shell.showNormal()
         else shell.showMaximized()
@@ -39,10 +40,12 @@ Rectangle {
         Item { Layout.fillWidth: true }
         Word { visible: v.entered && !v.demo; text: v.members + " 人"; color: shell.secondary; font.pixelSize: 14 }
         RoomButton {
-            visible: v.entered; quiet: true; horizontalPadding: shell.portrait ? 5 : 12
+            visible: v.entered && !shell.editingDefaults; quiet: true; horizontalPadding: shell.portrait ? 5 : 12
             text: shell.portrait ? "退出" : v.demo ? "退出试听" : "离开房间"; enabled: !v.busy
             onClicked: model.exitRoom()
         }
+        WindowButton { id: localButton; objectName: "localSettingsButton"; symbol: "settings"
+            description: "本地设置"; onClicked: shell.toggleDefaults() }
         WindowButton { objectName: "modeButton"; symbol: shell.portrait ? "landscape" : "portrait"
             description: shell.portrait ? "切换到横屏" : "切换到竖屏"; onClicked: frameControl.switchMode() }
         WindowButton { symbol: "min"; description: "最小化"; onClicked: shell.showMinimized() }

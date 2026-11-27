@@ -70,6 +70,7 @@ class RTCWorker(threading.Thread):
             try:
                 with Output(48000, 16) as output:
                     output.observe = getattr(self, "observe", None)
+                    output.playback_delay = getattr(self, "playback_delay", None)
                     async for event in stream:
                         with timed(self.timing if self.api.timing else None, "output", "device_ms"):
                             write = asyncio.create_task(asyncio.to_thread(output.write, bytes(event.frame.data.cast("B"))))
