@@ -167,17 +167,41 @@ async function poll(version) {
 function pcmLabel(host) {
   return host.compression === "flac" ? "无损 PCM · FLAC 压缩" : "无损 PCM";
 }
+function renderSong(info) {
+  const song = info?.current, next = info?.candidate;
+  const album = [song?.album, song?.released].filter(Boolean).join(" · ");
+  const hint = [next && ("即将到来　" + next.title + " - " + next.artist), info?.notice].filter(Boolean).join(" · ");
+  for (const [id, text] of [["songAlbum", album], ["songHint", hint]]) {
+    const node = $(id);
+    if (node.textContent !== text) node.textContent = text;
+    node.hidden = !text;
+  }
+  const cover = $("songCover"), url = song?.cover || "";
+  if ((cover.getAttribute("src") || "") === url) return;
+  cover.hidden = true;
+  $("disc").hidden = false;
+  if (!url) { cover.removeAttribute("src"); return; }
+  cover.onload = () => {
+    if (cover.getAttribute("src") === url) { cover.hidden = false; $("disc").hidden = true; }
+  };
+  cover.src = url;
+}
 function render(state) {
   const previous = room;
   room = state;
   const h = room.host;
   if (firstRoom) {
+    $("recognize").checked = false;
     $("codec").value = room.livekit ? "opus" : "pcm";
     firstRoom = false;
   }
   for (const option of $("codec").options)
     option.disabled = option.value === "flac" ? !state.flac : option.value.startsWith("opus") && !room.livekit;
   $("codec").disabled = room.hosting || room.pending || requesting;
+  const recognize = $("recognize");
+  recognize.disabled = !state.recognition_available || room.hosting || room.pending || requesting;
+  if (!state.recognition_available || (previous?.hosting && !room.hosting)) recognize.checked = false;
+  if (room.hosting) recognize.checked = Boolean(h.recognition);
   const field = $("hostThreshold"), policy = state.sync_policy;
   field.max = (policy?.max_ms ?? 1800) / 1000;
   $("syncHint").textContent = "建议 ≥ " + ((policy?.suggested_ms ?? 1000) / 1000).toFixed(1) + " 秒";
@@ -201,6 +225,7 @@ function render(state) {
   refreshPlayback();
   $("members").textContent = room.members + " 人在线";
   $("source").textContent = h ? h.source : "等待主持上台";
+  renderSong(h?.recognition);
   $("hostInfo").textContent = h
     ? h.name + " · " + h.rate / 1000 + " kHz · " + h.bits + "-bit · " + (h.codec === "opus" ? "Opus "+h.bitrate/1000+" kbps" : pcmLabel(h))
     : "";
@@ -362,6 +387,7 @@ $("stage").onclick = async () => {
     await captureContext.resume();
     if (input !== chosen) return;
     const state = await api("stage/request", {
+      recognize: $("recognize").checked,
       source,
       sync_request_ms: syncRequest,
       rate: captureContext.sampleRate,

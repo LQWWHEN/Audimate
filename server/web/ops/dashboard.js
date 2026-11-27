@@ -283,11 +283,14 @@ function renderControl(s) {
   const hostRequest = s.service.host_request_ms;
   byId("activeConfig").textContent += " · 有效同步阈值 "+policy.effective_ms/1000+" 秒"+
     (hostRequest == null ? "" : "（主持设置 "+hostRequest/1000+" 秒）");
+  byId("activeConfig").textContent += s.service.recognition_available
+    ? " · 歌曲识别每 " + active.recognition_interval_s + " 秒检查" : " · 歌曲识别不可用";
   const overrides = s.service.room_overrides || {};
   const signature=JSON.stringify([active.version,active.logging,overrides]);
   if (signature!==previousConfig) {
     byId("history").value=pending.history_s; byId("intervals").value=pending.intervals.join(", ");
     byId("lease").value=pending.lease_s;
+    byId("recognitionInterval").value=active.recognition_interval_s;
     byId("budget").value=active.history_mib; byId("blockLimit").value=active.history_blocks;
     byId("defaultSync").value=active.sync_default_ms/1000; byId("globalCap").value=active.sync_max_ms/1000;
     byId("roomDefault").value=overrides.sync_default_ms == null ? "" : overrides.sync_default_ms/1000;
@@ -331,6 +334,7 @@ byId("config").onsubmit = e => {
     room_overrides: {sync_default_ms: byId("roomDefault").value === "" ? null : Math.round(byId("roomDefault").valueAsNumber*1000),
                      sync_max_ms: byId("roomCap").value === "" ? null : Math.round(byId("roomCap").valueAsNumber*1000)},
     history_s: Number(byId("history").value),
+    recognition_interval_s: byId("recognitionInterval").valueAsNumber,
     intervals: byId("intervals").value.split(/[,，]/).map(Number),
     lease_s: Number(byId("lease").value),
   });

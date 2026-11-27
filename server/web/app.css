@@ -210,6 +210,11 @@ input {
   margin-left: auto;
   white-space: nowrap;
 }
+#songCover {
+  flex: none;
+  object-fit: cover;
+  border-radius: 6px;
+}
 .actions,
 #requests {
   margin-top: 18px;

@@ -14,6 +14,7 @@ from .host_setup import HostSetup, threshold_ms
 from .processes import current_track
 from .sharing import ProcessCapture, ShareSelection
 from .sync import SyncPolicy
+from .artwork import Cover
 
 
 class OnlineRoom:
@@ -105,8 +106,15 @@ class OnlineRoom:
         self.clear()
         ttk.Label(self.frame, text="在线音乐房间", style="Heading.TLabel").grid(row=0, column=0, sticky="w")
         ttk.Button(self.frame, text="退出登录", command=self.logout).grid(row=0, column=1, sticky="e")
-        self.info = ttk.Label(self.frame, wraplength=450)
-        self.info.grid(row=1, columnspan=2, sticky="w", pady=14)
+        song = ttk.Frame(self.frame)
+        song.grid(row=1, columnspan=2, sticky="w", pady=10)
+        self.cover = Cover(song)
+        self.cover.grid(row=0, column=0, rowspan=2, padx=(0, 12))
+        self.cover.grid_remove()
+        self.info = ttk.Label(song, wraplength=450)
+        self.info.grid(row=0, column=1, sticky="w")
+        self.song_hint = ttk.Label(song, wraplength=450, style="Muted.TLabel")
+        self.song_hint.grid(row=1, column=1, sticky="w")
         buttons = ttk.Frame(self.frame)
         buttons.grid(row=2, columnspan=2, sticky="w")
         self.listen = ttk.Button(buttons, text="收听", command=self.toggle_listen, state="disabled", style="Primary.TButton")
@@ -264,6 +272,7 @@ class OnlineRoom:
         if not self.picker:
             self.picker = HostSetup(self.window, self.request_stage, self.show_room)
         self.picker.threshold.set("跟随房间")
+        self.picker.recognize.set(False)
         self.picker.room_state(self.state)
         self.picker.refresh()
         self.frame.pack_forget()
@@ -298,7 +307,8 @@ class OnlineRoom:
             return
         self.selection = ShareSelection(src, fmt)
         codec = self.picker.codec.get()
-        payload = dict(sync_request_ms=sync_request, source=src.name, rate=fmt.sample_rate, bits=fmt.bits_per_sample,
+        payload = dict(sync_request_ms=sync_request, recognize=self.picker.recognize.get(),
+                       source=src.name, rate=fmt.sample_rate, bits=fmt.bits_per_sample,
                        codec="opus" if self.state["livekit"] and codec.startswith("Opus") else "pcm")
         if payload["codec"]=="opus":
             payload["bitrate"] = int(codec.split()[1])*1000
@@ -402,6 +412,15 @@ class OnlineRoom:
             if host.get("compression") == "flac":
                 label += " · FLAC 压缩"
         self.info.configure(text=f"{self.name}  ·  {state['members']} 人在线\n{label}")
+        info = (host or {}).get("recognition") or {}
+        song = info.get("current") or {}
+        candidate = info.get("candidate")
+        notes = [song.get("album"), song.get("released")]
+        if candidate:
+            notes.append(f"即将到来　{candidate['title']} - {candidate['artist']}")
+        notes.append(info.get("notice"))
+        self.song_hint.configure(text=" · ".join(filter(None, notes)))
+        self.cover.show(song.get("cover") or "")
         listen_label = "收听" if not self.want_listen else "停止收听" if host else "取消等候"
         self.listen.configure(text=listen_label, state="disabled" if state["hosting"] and not self.want_listen else "normal")
         self.sync.configure(state="normal" if self.listener else "disabled")

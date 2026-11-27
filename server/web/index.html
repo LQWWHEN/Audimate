@@ -57,11 +57,14 @@
           <span id="members"></span>
         </div>
         <article class="player">
-          <div class="small-disc" aria-hidden="true"></div>
+          <div class="small-disc" id="disc" aria-hidden="true"></div>
+          <img id="songCover" alt="专辑封面" width="76" height="76" referrerpolicy="no-referrer" hidden>
           <div>
             <div class="eyebrow">当前音源</div>
             <h2 id="source">等待主持上台</h2>
             <p id="hostInfo"></p>
+            <p id="songAlbum" hidden></p>
+            <p id="songHint" aria-live="polite" hidden></p>
           </div>
           <button id="listen" class="light">收听</button>
         </article>
@@ -84,6 +87,7 @@
           <label for="hostThreshold">同步阈值（秒）</label>
           <input type="number" step="0.001" min="0" id="hostThreshold" placeholder="跟随房间" aria-describedby="syncHint">
           <small id="syncHint">建议 ≥ 1.0 秒</small>
+          <label class="check"><input id="recognize" type="checkbox">歌曲识别</label>
           <button id="applyThreshold" hidden>应用</button>
           <button id="stage" class="primary" disabled aria-describedby="shareHelp">主持 · 共享音频</button
           ><button id="cancel" class="quiet" hidden>取消申请</button>

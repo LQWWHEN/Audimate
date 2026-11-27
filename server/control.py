@@ -11,7 +11,7 @@ class Problem(Exception):
         self.code, self.message = code, message
 
 
-DEFAULT = {"history_s": 12, "intervals": [5, 10, 30], "logging": "debug", "lease_s": 20,
+DEFAULT = {"history_s": 15, "recognition_interval_s": 10, "intervals": [5, 10, 30], "logging": "debug", "lease_s": 20,
            "history_mib": 64, "history_blocks": 3000, "sync_default_ms": 1200, "sync_max_ms": 1800,
            "version": 1}
 SYNC_FIELDS = ("sync_default_ms", "sync_max_ms")
@@ -56,6 +56,7 @@ class Control:
             raise Problem(404, "房间不存在")
         config = self.active.copy()
         for key, low, high in (("history_s", 1, 30), ("lease_s", 5, 300),
+                               ("recognition_interval_s", 1, 300),
                                ("history_mib", 2, 1024), ("history_blocks", 1, 30000)):
             value = data.get(key, config[key])
             if type(value) is not int or not low <= value <= high:

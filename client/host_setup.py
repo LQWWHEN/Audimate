@@ -87,9 +87,12 @@ class HostSetup(ttk.Frame):
         ttk.Entry(upload, width=9, textvariable=self.threshold).pack(side="left")
         self.hint = ttk.Label(upload)
         self.hint.pack(side="left", padx=4)
+        self.recognize = tk.BooleanVar(self, False)
+        self.recognize_check = ttk.Checkbutton(self, text="歌曲识别", variable=self.recognize)
+        self.recognize_check.grid(row=8, column=0, sticky="w", pady=(8, 0))
 
         footer = ttk.Frame(self)
-        footer.grid(row=8, column=0, sticky="ew", pady=(14, 0))
+        footer.grid(row=9, column=0, sticky="ew", pady=(14, 0))
         footer.columnconfigure(0, weight=1)
         ttk.Label(footer, textvariable=self.message, wraplength=300).grid(row=0, column=0, sticky="w")
         ttk.Button(footer, text="返回房间", command=back).grid(row=0, column=1, padx=8)
@@ -103,6 +106,10 @@ class HostSetup(ttk.Frame):
         self.depth.trace_add("write", lambda *_: self.validate())
 
     def room_state(self, state):
+        available = state.get("recognition_available", False)
+        self.recognize_check.state(["!disabled"] if available else ["disabled"])
+        if not available:
+            self.recognize.set(False)
         suggested = state.get("sync_policy", {}).get("suggested_ms", 1000)
         self.hint.configure(text=f"建议 ≥ {suggested/1000:.1f}")
         self.action.configure(text="提交申请" if state["host"] else "开始主持")

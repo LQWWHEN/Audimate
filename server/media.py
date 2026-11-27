@@ -175,7 +175,7 @@ class Media:
                         trace = None
                         if room.monitor.development and room.monitor.level == "debug":
                             trace = dict(pack_ms=(time.monotonic()-start)*1000,packet_bytes=len(buffer))
-                        room.history.append(bytes(buffer), 48000, 2, trace=trace)
+                        room.append_audio(bytes(buffer), 48000, 2, trace=trace)
                         room.last_audio = time.monotonic()
                         if trace:
                             trace["server_seq"] = room.history.sequence

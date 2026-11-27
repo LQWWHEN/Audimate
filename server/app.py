@@ -15,12 +15,13 @@ import traceback
 from urllib.parse import parse_qs, urlsplit
 
 if __package__:
-    from . import flac
+    from . import flac, recognition
     from .monitor import Member, Monitor, client_type
     from .control import DEFAULT, Control, Problem, sync_ms
     from .media import Media, History
 else:  # Gunicorn imports app:create_app() from the deployment directory.
     import flac
+    import recognition
     from monitor import Member, Monitor, client_type
     from control import DEFAULT, Control, Problem, sync_ms
     from media import Media, History
@@ -86,6 +87,8 @@ class Room:
         self.host = None
         self.media = Media()
         self.history = History(DEFAULT["history_s"])
+        self.recognition = None
+        self.recognition_busy = False
         self.lease_s = DEFAULT["lease_s"]
         self.monitor = Monitor(development)
         self.flush_service = None
@@ -106,6 +109,23 @@ class Room:
         self.lease_s = config["lease_s"]
         if self.host:
             self.history.prune(now, 48000 if self.host["codec"] == "opus" else self.host["rate"])
+            self.update_recognition()
+
+    def can_recognize(self):
+        return recognition.AVAILABLE and self.history.seconds >= recognition.WINDOW_S
+
+    def update_recognition(self):
+        if self.host and self.host.get("recognize") and self.can_recognize():
+            title = self.host["track"]
+            if self.recognition is None or self.recognition.title != title:
+                self.recognition = recognition.Recognition(self.history.end_frame, title)
+        else:
+            self.recognition = None
+
+    def append_audio(self, pcm, rate, width, captured=None, trace=None, *, wire=None):
+        self.history.append(pcm, rate, width, captured, trace, wire=wire)
+        if self.recognition:
+            self.recognition.schedule(self, rate, width)
 
     def sync_policy(self, *, reference_ms=None):
         # A future room-level latency estimator may supply a reference once it has enough samples.
@@ -157,6 +177,7 @@ class Room:
             self.media.remove(self.host["stream"])
         self.host = None
         self.pending.clear()
+        self.recognition = None
         self.history.clear()
         self.stage_since = self.last_audio = None
         for member in self.members.values():
@@ -183,6 +204,7 @@ class Room:
     def grant(self, key, choice):
         self.reset()
         self.host = dict(choice, key=key, stream=secrets.token_hex(12), track=None, audio_block_ms=self.audio_block_ms)
+        self.update_recognition()
         if self.monitor.development:
             self.monitor.round_id = secrets.token_hex(12)
         self.stage_since = time.monotonic()
@@ -195,9 +217,16 @@ class Room:
         host = self.host
         mine = bool(host and host["key"] == key)
         public_host = {k: v for k, v in host.items() if k != "key"} if host else None
-        if host and host["track"]:
-            public_host["source"] = f"{host['track']['title']} - {host['track']['artist']}"
+        if host:
+            info = self.recognition.view() if self.recognition else None
+            public_host["recognition"] = info
+            display = host["track"] or (info and info["current"])
+            if display:
+                public_host["source"] = f"{display['title']} - {display['artist']}"
+            elif info:
+                public_host["source"] = "尝试匹配中"
         return {"room_id": self.room_id, "sync_policy": self.sync_policy(), "host": public_host,
+                "recognition_available": self.can_recognize(),
                 "hosting": mine, "pending": key in self.pending,
                 "requests": [{"id": req["id"], "name": req["name"]} for req in self.pending.values()] if mine else [],
                 "members": len(self.members), "livekit": self.media.enabled, "flac": flac.AVAILABLE}
@@ -224,6 +253,9 @@ class Room:
             choice = dict(name=name, rate=rate, bits=bits, source=label.strip(), codec=codec, compression=compression,
                           channels=2, bitrate=bitrate if codec == "opus" else rate * bits * 2, id=secrets.token_hex(8))
             value = data.get("sync_request_ms")
+            choice["recognize"] = data.get("recognize", False)
+            if type(choice["recognize"]) is not bool or choice["recognize"] and not self.can_recognize():
+                raise Problem(400, "当前房间无法启用歌曲识别")
             choice["sync_request_ms"] = None if value is None else sync_ms(value)
             if not self.host:
                 self.grant(key, choice)
@@ -252,6 +284,7 @@ class Room:
                     raise Problem(400, "曲目需要有效的歌名和歌手")
                 track = {k: v.strip() for k, v in track.items()}
             self.host["track"] = track
+            self.update_recognition()
         elif action == "leave":
             # A delayed stop from a former stream must not stop a new one.
             if self.host and self.host["key"] == key and self.host["stream"] == data.get("stream"):
@@ -460,6 +493,7 @@ class App:
                     snapshot["service"] = self.control.snapshot(conn)
                     snapshot["service"].update(room_id=self.room.room_id, room_overrides=self.room.overrides,
                                                sync_policy=self.room.sync_policy(),
+                                               recognition_available=self.room.can_recognize(),
                                                host_request_ms=self.room.host.get("sync_request_ms") if self.room.host else None)
                     snapshot["livekit"] = self.room.media.enabled
                     snapshot["operator"] = user[0]
@@ -575,7 +609,7 @@ class App:
                         if re.fullmatch(r"[0-9]{1,12}", packet_id):
                             detail["source_seq"] = int(packet_id)
                         store_start = time.monotonic()
-                    room.history.append(pcm, host["rate"], align // 2, captured, detail,
+                    room.append_audio(pcm, host["rate"], align // 2, captured, detail,
                                         wire=packet if decoded is not None else None)
                     room.last_audio = time.monotonic()
                     room.monitor.traffic(room.members[key], received=len(packet))
@@ -645,6 +679,7 @@ class App:
         headers.extend([("Content-Length", str(len(payload))), ("Cache-Control", "no-store"),
                         ("X-Content-Type-Options", "nosniff"), ("Referrer-Policy", "no-referrer"),
                         ("Content-Security-Policy", "default-src 'self'; " +
+                         "img-src 'self' https://*.mzstatic.com https://*.shazam.com; " +
                          ("script-src 'self' 'wasm-unsafe-eval'; " if path == "/flac-worker.js" else "") +
                          "connect-src 'self' wss: ws://localhost:* ws://127.0.0.1:*; media-src 'self' blob:; worker-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")])
         start_response("{} {}".format(code, responses[code]), headers)

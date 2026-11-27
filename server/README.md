@@ -137,7 +137,15 @@ python3 ops_admin.py --db /var/lib/audimate/accounts.sqlite3 revoke existing-use
 | `POST /api/audio?stream=…` | 当前主持发送有符号小端交错立体声 PCM |
 | `GET /api/audio?stream=…&after=…` | 按序号取音频块，序号见 `X-Sequence`。初次使用 `-1` 取最新块，暂时无新块返回 204 |
 
-密码使用带独立随机盐的 PBKDF2-HMAC-SHA256。登录有效期为 7 天，数据库保存令牌摘要。最多 19 个活跃房间会话，按运维配置的离线超时释放席位。音频按约 200 毫秒分块，服务器按样本数、包龄、字节预算及块数限制缓存，新库默认 12 秒。首次或手动同步用 `sync=1` 获取距最新样本约 600 ms 的块，历史越界会返回 `X-Reset`，停流时旧包按时失效。48 kHz / 16-bit 双声道 PCM 每名听众约占 1.54 Mbps 出口，96 kHz / 24-bit 约占 4.61 Mbps，另有协议开销。
+密码使用带独立随机盐的 PBKDF2-HMAC-SHA256。登录有效期为 7 天，数据库保存令牌摘要。最多 19 个活跃房间会话，按运维配置的离线超时释放席位。音频按约 200 毫秒分块，服务器按样本数、包龄、字节预算及块数限制缓存，新库默认 15 秒。首次或手动同步用 `sync=1` 获取距最新样本约 600 ms 的块，历史越界会返回 `X-Reset`，停流时旧包按时失效。48 kHz / 16-bit 双声道 PCM 每名听众约占 1.54 Mbps 出口，96 kHz / 24-bit 约占 4.61 Mbps，另有协议开销。
+
+### 歌曲识别
+
+上台时勾选「歌曲识别」后，服务端从该轮主持的 PCM、FLAC 或 Opus 解码历史取样，在后台用 ShazamIO 生成并提交指纹。历史上限至少为 12 秒才提供开关。样本实际可用长度同时受字节和块数预算限制。运维可在线调整 `recognition_interval_s`（默认 10 秒），识别任务按新值安排下一轮。缓存降至门槛以下会暂停本轮识别，调回后从新样本重新开始。
+
+播放器有标题时先取 5 秒音频并在末尾补静音至 12 秒，曲名与歌手匹配即可补充资料。无标题时使用完整窗口，同一录音的再次确认至少包含 10 秒新音频。检查超时保留现有曲目和候选。一次请求上限为 8 秒，每房最多一个在途请求，开发运维事件记录查询类型、结果和耗时。
+
+真实识别验收使用 ShazamIO 仓库 `examples/data/Gloria.ogg`，将其前 28 秒转换为双声道 PCM WAV，设置 `AUDIMATE_RECOGNITION_WAV` 为文件绝对路径后运行 `python -m unittest client.test_recognition_live -v`。用例需要 Windows、Chrome、Playwright 和服务端识别依赖。可在隔离的本地 LiveKit 环境设置 `AUDIMATE_RECOGNITION_RTC=1` 验证 Opus 主持。
 
 ## 验证
 
