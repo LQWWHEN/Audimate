@@ -90,6 +90,7 @@ class Room:
         self.media = Media()
         self.history = History(DEFAULT["history_s"])
         self.recognition = None
+        self.recognition_worker = None
         self.recognition_busy = False
         self.recognition_retry_at = None  # A provider cooldown belongs to the room across host/title changes.
         self.lease_s = DEFAULT["lease_s"]
@@ -127,6 +128,20 @@ class Room:
                 self.recognition = recognition.Recognition(self.history.end_frame, title)
         else:
             self.recognition = None
+            self.close_recognizer()
+
+    def close_recognizer(self):
+        if self.recognition_worker is not None:
+            self.recognition_worker.close()
+            self.recognition_worker = None
+
+    def queue_recognition(self, state, parts, rate, width, quick):
+        now = time.monotonic()
+        if self.recognition_worker and self.recognition_worker.expired(now):
+            self.close_recognizer()
+        if self.recognition_worker is None:
+            self.recognition_worker = recognition.RecognitionWorker(self)
+        self.recognition_worker.submit(state, parts, rate, width, quick)
 
     def append_audio(self, pcm, rate, width, captured=None, trace=None, *, wire=None):
         self.history.append(pcm, rate, width, captured, trace, wire=wire)
@@ -180,7 +195,9 @@ class Room:
             self.monitor.event("主持", f"{self.host['name']} 结束主持")
             self.reset()
 
-    def reset(self):
+    def reset(self, *, keep_recognizer=False):
+        if not keep_recognizer:
+            self.close_recognizer()
         if self.host:
             member = self.members.get(self.host["key"])
             if member and self.monitor.development:
@@ -199,6 +216,8 @@ class Room:
             member.progress = None
 
     def expire(self, now):
+        if self.recognition_worker and self.recognition_worker.expired(now):
+            self.close_recognizer()
         if self.host and self.host_control_until is not None and now >= self.host_control_until:
             self.leave(self.host["key"], "主持控制连接超时")
         if now < self.lease_grace_until:
@@ -235,7 +254,7 @@ class Room:
         return member
 
     def grant(self, key, choice):
-        self.reset()
+        self.reset(keep_recognizer=bool(self.host and choice.get("recognize") and self.can_recognize()))
         self.host = dict(choice, key=key, stream=secrets.token_hex(12), track=None, audio_block_ms=self.audio_block_ms)
         self.update_recognition()
         if self.monitor.development:

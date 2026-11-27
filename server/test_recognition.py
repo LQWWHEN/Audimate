@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 import wave
 
 from . import recognition
@@ -126,12 +126,12 @@ class RecognitionTests(unittest.TestCase):
         track = dict(id="482734446", title="I Will Survive", artist="Gloria Gaynor")
         ends = []
         for second in range(1, 24):
-            with patch("server.recognition.threading.Thread") as worker, patch("time.monotonic", return_value=200+second):
+            with patch.object(self.room, "queue_recognition") as worker, patch("time.monotonic", return_value=200+second):
                 self.room.append_audio(bytes(8000*4), 8000, 2)
             if worker.called:
-                args = worker.call_args.kwargs["args"]
+                _, *args = worker.call_args.args
                 with patch.object(recognition, "identify", AsyncMock(return_value=track)):
-                    state.run(*args)
+                    state.run(self.room, *args)
                 ends.append((second, args[-1], state.current is not None))
         self.assertEqual(ends, [(5, True, False), (12, False, False), (22, False, True)])
 
@@ -352,6 +352,93 @@ class RecognitionTests(unittest.TestCase):
                     self.assertEqual(recognition.retry_after_seconds(value), expected)
 
     @unittest.skipUnless(recognition.AVAILABLE, "requires ShazamIO")
+    def test_room_reuses_real_http_connection_across_queries_catalog_and_handoff(self):
+        from shazamio.api import ShazamUrl
+
+        requests = []
+        retry_after = None
+        class Upstream(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+            def log_message(self, *args):
+                pass
+            def reply(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                requests.append((self.command, self.client_address))
+                track = dict(key="123", title="Song", subtitle="Artist")
+                content = json.dumps(dict(matches=[{}], track=track) if self.command == "POST" else track).encode()
+                self.send_response(429 if retry_after else 200)
+                if retry_after:
+                    self.send_header("Retry-After", retry_after)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(content)))
+                self.end_headers()
+                self.wfile.write(content)
+            do_POST = do_GET = reply
+
+        def query(status=200):
+            with self.room.lock:
+                self.room.recognition_busy = True
+                self.room.queue_recognition(self.room.recognition, [bytes(12*8000*4)], 8000, 2, False)
+                worker = self.room.recognition_worker
+            worker.executor.submit(lambda: None).result(timeout=8)
+            self.assertFalse(self.room.recognition_busy)
+            self.assertIn(f"HTTP 尝试 1 次（{status}）", self.room.monitor.events[0]["detail"])
+            return worker
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Upstream) as upstream:
+            threading.Thread(target=upstream.serve_forever, daemon=True).start()
+            url = f"http://127.0.0.1:{upstream.server_port}"
+            try:
+                with patch.object(ShazamUrl, "SEARCH_FROM_FILE", url), patch.object(ShazamUrl, "ABOUT_TRACK", url):
+                    self.player("曲名", "歌手")
+                    first = query()
+                    self.room.grant("next", dict(self.choice, name="Bob"))
+                    self.assertIs(query(), first)
+                    self.assertEqual([m for m, _ in requests], ["POST", "GET", "GET", "GET", "POST"])
+                    self.assertEqual(len({addr for _, addr in requests}), 1)
+                    self.room.expire(first.idle_since + recognition.SESSION_IDLE_S)
+                    self.assertIsNone(self.room.recognition_worker)
+                    first.executor.shutdown(wait=True)
+                    retry_after = "120"
+                    second = query(429)
+                    self.assertNotEqual(requests[-1][1], requests[0][1])
+                    deadline = self.room.recognition_retry_at
+                    self.room.expire(second.idle_since + recognition.SESSION_IDLE_S)
+                    self.room.append_audio(bytes(12*8000*4), 8000, 2)
+                    self.assertIsNone(self.room.recognition_worker)
+                    self.assertEqual(self.room.recognition_retry_at, deadline)
+                    self.room.reset()
+                    self.assertIsNone(self.room.recognition_worker)
+                    second.executor.shutdown(wait=True)
+            finally:
+                self.room.close_recognizer()
+                upstream.shutdown()
+
+    def test_step_down_cancels_inflight_query(self):
+        entered, stopped = threading.Event(), threading.Event()
+        async def slow(wav, trace):
+            entered.set()
+            try:
+                await asyncio.sleep(60)
+            finally:
+                stopped.set()
+        with patch.object(recognition, "identify", slow):
+            with self.room.lock:
+                self.room.recognition_busy = True
+                self.room.queue_recognition(self.room.recognition, [], 8000, 2, False)
+                worker = self.room.recognition_worker
+            try:
+                self.assertTrue(entered.wait(3))
+                with self.room.lock:
+                    self.room.grant("next", dict(self.choice, name="Bob", recognize=False))
+                self.assertTrue(stopped.wait(2))
+                self.assertIsNone(self.room.recognition_worker)
+            finally:
+                self.room.close_recognizer()
+                worker.executor.shutdown(wait=True)
+        self.assertFalse(self.room.recognition_busy)
+
+    @unittest.skipUnless(recognition.AVAILABLE, "requires ShazamIO")
     def test_sdk_stops_on_first_429_for_fingerprint_and_catalog(self):
         from shazamio.api import ShazamUrl
 
@@ -439,14 +526,14 @@ class RecognitionTests(unittest.TestCase):
                     title = "B" if second == 23 else "C"
                     self.room.action("another", "Bob", "track",
                                      dict(stream=self.room.host["stream"], track=dict(title=title, artist="Artist")))
-                with patch("server.recognition.threading.Thread") as worker:
+                with patch.object(self.room, "queue_recognition") as worker:
                     self.room.append_audio(bytes([second]) * (8000 * 4), 8000, 2)
                 if worker.called:
-                    args = worker.call_args.kwargs["args"]
-                    probes.append((second, args[-1], args[1][0][0], args[1][-1][-1]))
+                    state, *args = worker.call_args.args
+                    probes.append((second, args[-1], args[0][0][0], args[0][-1][-1]))
                     reply = AsyncMock(side_effect=recognition.RateLimited("15")) if second == 30 else AsyncMock(return_value=None)
                     with patch.object(recognition, "identify", reply):
-                        self.room.recognition.run(*args)
+                        state.run(self.room, *args)
             self.assertEqual(probes, [(30, True, 26, 30), (45, False, 34, 45), (55, False, 44, 55)])
             self.assertIsNone(self.room.recognition_retry_at)
             self.assertFalse(self.room.recognition.notice)
@@ -484,12 +571,11 @@ class RecognitionTests(unittest.TestCase):
     def test_window_selection_padding_and_interval_changes(self):
         rate, width = 8000, 3
         parts = []
-        def record(*, target, args, **kwargs):
-            room, chunks, sample_rate, sample_width, quick = args
+        def record(state, chunks, sample_rate, sample_width, quick):
             parts.append((quick, recognition.encode_window(chunks, sample_rate, sample_width, quick)))
-            return Mock(start=lambda: setattr(room, "recognition_busy", False))
+            self.room.recognition_busy = False
         self.title("A")
-        with patch("server.recognition.threading.Thread", side_effect=record), patch("time.monotonic") as now:
+        with patch.object(self.room, "queue_recognition", side_effect=record), patch("time.monotonic") as now:
             for n in range(29):
                 now.return_value = 200 + n * 0.5
                 self.room.append_audio(bytes([n+1])*(rate*width), rate, width)

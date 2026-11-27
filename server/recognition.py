@@ -1,5 +1,8 @@
 """Per-room recognition. Only immutable slices of the playback history leave the room lock."""
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from importlib.util import find_spec
@@ -26,6 +29,9 @@ QUICK_S = 5
 QUERY_TIMEOUT_S = 8
 CATALOG_TIMEOUT_S = 3
 RATE_LIMIT_COOLDOWN_S = 30
+SESSION_IDLE_S = 60
+_worker = ContextVar("recognition_worker", default=None)
+_trace = ContextVar("fingerprint_trace", default=None)
 AVAILABLE = find_spec("shazamio") is not None
 
 _KANA = re.compile(r"[\u3041-\u3096\u30a1-\u30fa]")
@@ -133,20 +139,28 @@ class RateLimited(Exception):
         self.retry_at = time.monotonic() + self.seconds
 
 
-def shazam_service(*, trace=None, **options):
+@asynccontextmanager
+async def shazam_service(*, trace=None, language, endpoint_country="GB"):
     from shazamio import Shazam
-    service = Shazam(**options)
-    config = service.http_client.trace_config
-    if trace is not None:
-        trace.attach(config)
-
-    async def check_rate_limit(session, ctx, params):
-        if params.response.status == 429:
-            raise RateLimited(params.response.headers.get("Retry-After"))
-
-    # Observe headers before the SDK can retry a 429 or wait for its body.
-    config.on_request_end.append(check_rate_limit)
-    return service
+    worker = _worker.get()
+    owner = worker.provider if worker else None
+    if owner is None:
+        owner = Shazam(language=language, endpoint_country=endpoint_country)
+        QueryTrace.attach(owner.http_client.trace_config)
+        if worker:
+            worker.provider = owner
+    service = owner
+    if (language, endpoint_country) != (owner.language, owner.endpoint_country):
+        service = Shazam(language=language, endpoint_country=endpoint_country, http_client=owner.http_client)
+    token = _trace.set(trace)
+    try:
+        if trace:
+            trace.mark("生成指纹并准备请求")
+        yield service
+    finally:
+        _trace.reset(token)
+        if not worker:
+            await owner.close()
 
 
 async def localized_names(key, language, country):
@@ -226,18 +240,33 @@ class QueryTrace:
         self.stage = stage
         self.since = time.monotonic()
 
-    def attach(self, config):
+    @staticmethod
+    def attach(config):
         async def request_start(session, ctx, params):
-            self.responses.append(None)
-            self.mark("准备连接")
+            trace = _trace.get()
+            if trace:
+                trace.responses.append(None)
+                trace.mark("准备连接")
 
         async def response_headers(session, ctx, params):
-            self.responses[-1] = params.response.status
-            self.mark("收到响应头，等待读取或重试")
+            trace = _trace.get()
+            if trace:
+                trace.responses[-1] = params.response.status
+                trace.mark("收到响应头，等待读取或重试")
+            if params.response.status == 429:
+                limited = RateLimited(params.response.headers.get("Retry-After"))
+                worker = _worker.get()
+                if worker:
+                    # A simultaneous step-down can cancel the task during SDK cleanup.
+                    with worker.room.lock:
+                        worker.room.recognition_retry_at = limited.retry_at
+                raise limited
 
         def milestone(stage):
             async def record(session, ctx, params):
-                self.mark(stage)
+                trace = _trace.get()
+                if trace:
+                    trace.mark(stage)
             return record
 
         config.on_request_start.append(request_start)
@@ -247,7 +276,6 @@ class QueryTrace:
         config.on_request_headers_sent.append(milestone("发送请求体"))
         config.on_request_chunk_sent.append(milestone("等待上游响应头"))
         config.on_request_end.append(response_headers)
-        self.mark("生成指纹并准备请求")
 
     def http_summary(self):
         if not self.responses:
@@ -271,6 +299,63 @@ def encode_window(parts, rate, width, quick):
         if quick:
             wav.writeframesraw(bytes((WINDOW_S - QUICK_S) * rate * width * 2))
     return output.getvalue()
+
+
+class RecognitionWorker:
+    """One serial executor owns the room's event loop and the SDK connection pool."""
+
+    def __init__(self, room):
+        self.room = room
+        self.executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="room-shazam")
+        self.runner = asyncio.Runner()
+        self.provider = self.task = self.idle_since = None
+        self.closed = False
+
+    def expired(self, now):
+        return self.idle_since is not None and now - self.idle_since >= SESSION_IDLE_S
+
+    def submit(self, state, parts, rate, width, quick):
+        self.idle_since = None
+        self.executor.submit(self.work, state, parts, rate, width, quick)
+
+    def work(self, state, parts, rate, width, quick):
+        try:
+            state.run(self.room, parts, rate, width, quick, execute=self.execute)
+        finally:
+            with self.room.lock:
+                if not self.room.recognition_busy:
+                    self.idle_since = time.monotonic()
+
+    def execute(self, query):
+        async def run():
+            with self.room.lock:
+                if self.closed:
+                    query.close()
+                    raise asyncio.CancelledError
+                self.task = asyncio.current_task()
+            token = _worker.set(self)
+            try:
+                return await query
+            finally:
+                _worker.reset(token)
+                with self.room.lock:
+                    self.task = None
+        return self.runner.run(run())
+
+    def close(self):
+        # Called with the room lock. Socket cleanup stays on its owning thread.
+        self.closed = True
+        if self.task:
+            self.task.get_loop().call_soon_threadsafe(self.task.cancel)
+        self.executor.submit(self.close_connections)
+        self.executor.shutdown(wait=False)
+
+    def close_connections(self):
+        try:
+            if self.provider:
+                self.runner.run(self.provider.close())
+        finally:
+            self.runner.close()
 
 
 class Recognition:
@@ -383,10 +468,9 @@ class Recognition:
             self.last_start, self.last_end = now, end
         room.recognition_retry_at = None
         room.recognition_busy = True
-        threading.Thread(target=self.run, args=(room, parts, rate, width, quick),
-                         name="song-recognition", daemon=True).start()
+        room.queue_recognition(self, parts, rate, width, quick)
 
-    def run(self, room, parts, rate, width, quick):
+    def run(self, room, parts, rate, width, quick, *, execute=asyncio.run):
         with room.lock:
             if room.recognition is not self:
                 room.recognition_busy = False
@@ -400,8 +484,12 @@ class Recognition:
         limited = None
         agreement = evidence = ""
         try:
-            match, agreement, evidence, limited = asyncio.run(self.query(encode_window(parts, rate, width, quick), trace, policy))
+            match, agreement, evidence, limited = execute(self.query(encode_window(parts, rate, width, quick), trace, policy))
             outcome = "命中" if match else "未匹配"
+        except asyncio.CancelledError:
+            with room.lock:
+                room.recognition_busy = False
+            return
         except RateLimited as exc:
             limited = exc
             outcome = "上游限流"
