@@ -89,6 +89,7 @@ class Room:
         self.history = History(DEFAULT["history_s"])
         self.recognition = None
         self.recognition_busy = False
+        self.recognition_retry_at = None  # A provider cooldown belongs to the room across host/title changes.
         self.lease_s = DEFAULT["lease_s"]
         self.monitor = Monitor(development)
         self.flush_service = None

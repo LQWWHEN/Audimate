@@ -1,9 +1,11 @@
 import asyncio
 from io import BytesIO
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 import wave
@@ -257,7 +259,8 @@ class RecognitionTests(unittest.TestCase):
         with patch.object(recognition, "identify", AsyncMock(return_value=track)), patch.object(
                 recognition, "localized_names", AsyncMock(side_effect=TimeoutError())) as lookup:
             for _ in range(2):
-                raw, agreement, evidence = asyncio.run(state.query(b"", None))
+                raw, agreement, evidence, limited = asyncio.run(state.query(b"", None))
+                self.assertIsNone(limited)
                 self.assertIs(raw, track)
                 self.assertFalse(agreement)
                 self.assertIn("TimeoutError", evidence)
@@ -317,7 +320,7 @@ class RecognitionTests(unittest.TestCase):
                 self.rfile.read(int(self.headers["Content-Length"]))
                 Upstream.attempts += 1
                 if Upstream.attempts == 1:
-                    self.send_response(429)
+                    self.send_response(503)
                     self.end_headers()
                 else:
                     release.wait(8)
@@ -335,9 +338,118 @@ class RecognitionTests(unittest.TestCase):
         event = self.room.monitor.events[0]
         self.assertEqual((event["kind"], event["error"]), ("识别", True))
         self.assertIn("完整窗口 · 超时", event["message"])
-        for expected in ("TimeoutError", "时限 2 秒", "等待上游响应头", "HTTP 尝试 2 次（429 → 未收到响应头）"):
+        for expected in ("TimeoutError", "时限 2 秒", "等待上游响应头", "HTTP 尝试 2 次（503 → 未收到响应头）"):
             self.assertIn(expected, event["detail"])
         self.assertNotIn("private-path", str(event))
+        self.assertIsNone(self.room.recognition_retry_at)
+
+    def test_retry_after_seconds_or_http_date(self):
+        with patch.object(recognition.time, "time", return_value=784111770):
+            for value, expected in ((" 17 ", 17), ("0", 0), ("Sun, 06 Nov 1994 08:49:37 GMT", 7),
+                                    ("Sun, 06 Nov 1994 08:49:29 GMT", 0), (None, None), ("", None),
+                                    ("later", None), ("-10", None), ("1.5", None)):
+                with self.subTest(value=value):
+                    self.assertEqual(recognition.retry_after_seconds(value), expected)
+
+    @unittest.skipUnless(recognition.AVAILABLE, "requires ShazamIO")
+    def test_sdk_stops_on_first_429_for_fingerprint_and_catalog(self):
+        from shazamio.api import ShazamUrl
+
+        hit = dict(matches=[{}], track=dict(key="100", title="Song", subtitle="Artist"))
+        responses = [(429, "41", {}), (200, None, hit), (429, None, {}), (429, "bad", {})]
+        requests = []
+
+        class Upstream(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def respond(self):
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                requests.append(self.command)
+                status, delay, payload = responses.pop(0) if responses else (400, None, {})
+                self.send_response(status)
+                if delay is not None:
+                    self.send_header("Retry-After", delay)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode())
+
+            do_GET = do_POST = respond
+
+        audio = [bytes(12 * 8000 * 4)]
+        with ThreadingHTTPServer(("127.0.0.1", 0), Upstream) as server:
+            threading.Thread(target=server.serve_forever, daemon=True).start()
+            url = f"http://127.0.0.1:{server.server_port}"
+            try:
+                with patch.object(ShazamUrl, "SEARCH_FROM_FILE", url), patch.object(ShazamUrl, "ABOUT_TRACK", url), \
+                        patch.object(recognition, "time", wraps=time) as clock:
+                    clock.monotonic.return_value = 100
+                    self.room.monitor.set_level("errors")
+                    state = self.room.recognition
+                    state.current = song("A")
+                    state.run(self.room, audio, 8000, 2, False)
+                    event = self.room.monitor.events[0]
+                    self.assertEqual(requests, ["POST"])
+                    self.assertTrue(event["error"])
+                    self.assertIn("上游限流", event["message"])
+                    self.assertIn("冷却 41 秒（Retry-After）", event["detail"])
+                    self.assertIn("HTTP 尝试 1 次（429）", event["detail"])
+                    self.assertEqual((self.room.recognition_retry_at, self.status()["source"]), (141, "A - Artist"))
+
+                    clock.monotonic.return_value = 141
+                    state = self.player("歌曲", "艺人")
+                    state.run(self.room, audio, 8000, 2, True)
+                    event = self.room.monitor.events[0]
+                    self.assertEqual(requests, ["POST", "POST", "GET"])
+                    self.assertIn("命中", event["message"])
+                    self.assertIn("Song - Artist", event["message"])
+                    self.assertIn("本地化目录 HTTP 429 · 冷却 30 秒（默认）", event["detail"])
+                    self.assertIn("指纹查询 HTTP 尝试 1 次（200）", event["detail"])
+                    self.assertEqual((self.room.recognition_retry_at, self.status()["source"]), (171, "歌曲 - 艺人"))
+
+                    clock.monotonic.return_value = 171
+                    self.room.monitor.development = False
+                    self.room.monitor.set_level("off")
+                    state.run(self.room, audio, 8000, 2, False)
+                    self.assertEqual(requests, ["POST", "POST", "GET", "POST"])
+                    self.assertEqual(self.room.recognition_retry_at, 201)
+                    self.assertFalse(self.room.monitor.events)
+            finally:
+                server.shutdown()
+
+    def test_cooldown_survives_handoff_and_resumes_once_from_latest_audio(self):
+        self.title("A")
+        old = self.room.recognition
+
+        async def limited_after_handoff(wav, trace):
+            self.room.grant("another", dict(self.choice, name="Bob"))
+            raise recognition.RateLimited(None)
+
+        with patch.object(recognition, "time", wraps=time) as clock:
+            clock.monotonic.return_value = 100
+            with patch.object(recognition, "identify", limited_after_handoff):
+                old.run(self.room, [], 8000, 2, True)
+            self.assertEqual(self.room.recognition_retry_at, 130)
+            self.assertFalse(self.room.recognition.notice)
+            self.assertIn("上游限流", self.room.monitor.events[0]["message"])
+            probes = []
+            for second in range(1, 56):
+                clock.monotonic.return_value = 100 + second
+                if second in (23, 32):
+                    title = "B" if second == 23 else "C"
+                    self.room.action("another", "Bob", "track",
+                                     dict(stream=self.room.host["stream"], track=dict(title=title, artist="Artist")))
+                with patch("server.recognition.threading.Thread") as worker:
+                    self.room.append_audio(bytes([second]) * (8000 * 4), 8000, 2)
+                if worker.called:
+                    args = worker.call_args.kwargs["args"]
+                    probes.append((second, args[-1], args[1][0][0], args[1][-1][-1]))
+                    reply = AsyncMock(side_effect=recognition.RateLimited("15")) if second == 30 else AsyncMock(return_value=None)
+                    with patch.object(recognition, "identify", reply):
+                        self.room.recognition.run(*args)
+            self.assertEqual(probes, [(30, True, 26, 30), (45, False, 34, 45), (55, False, 44, 55)])
+            self.assertIsNone(self.room.recognition_retry_at)
+            self.assertFalse(self.room.recognition.notice)
 
     def test_inflight_invalidated_by_title_cache_and_handoff(self):
         for change in ("title", "limits", "handoff"):

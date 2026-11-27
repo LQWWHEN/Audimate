@@ -1,8 +1,11 @@
 """Per-room recognition. Only immutable slices of the playback history leave the room lock."""
 import asyncio
+from datetime import timezone
+from email.utils import parsedate_to_datetime
 from importlib.util import find_spec
 import io
 import logging
+import math
 import os
 from pathlib import Path
 import re
@@ -22,6 +25,7 @@ WINDOW_S = 12
 QUICK_S = 5
 QUERY_TIMEOUT_S = 8
 CATALOG_TIMEOUT_S = 3
+RATE_LIMIT_COOLDOWN_S = 30
 AVAILABLE = find_spec("shazamio") is not None
 
 _KANA = re.compile(r"[\u3041-\u3096\u30a1-\u30fa]")
@@ -104,9 +108,49 @@ def catalog_locales(title, match):
     return ()
 
 
-async def localized_names(key, language, country):
+def retry_after_seconds(value):
+    if not value:
+        return None
+    value = value.strip()
+    try:
+        if re.fullmatch(r"[0-9]+", value):
+            # Saturate oversized HTTP integers before adding them to a monotonic deadline.
+            return int(min(float(value), 2**31 - 1))
+        date = parsedate_to_datetime(value)
+        if date.tzinfo is None:
+            date = date.replace(tzinfo=timezone.utc)
+        return max(0, math.ceil(date.timestamp() - time.time()))
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+class RateLimited(Exception):
+    def __init__(self, retry_after):
+        super().__init__("HTTP 429")
+        delay = retry_after_seconds(retry_after)
+        self.seconds = RATE_LIMIT_COOLDOWN_S if delay is None else delay
+        self.source = "默认" if delay is None else "Retry-After"
+        self.retry_at = time.monotonic() + self.seconds
+
+
+def shazam_service(*, trace=None, **options):
     from shazamio import Shazam
-    async with Shazam(language=language, endpoint_country=country) as service:
+    service = Shazam(**options)
+    config = service.http_client.trace_config
+    if trace is not None:
+        trace.attach(config)
+
+    async def check_rate_limit(session, ctx, params):
+        if params.response.status == 429:
+            raise RateLimited(params.response.headers.get("Retry-After"))
+
+    # Observe headers before the SDK can retry a 429 or wait for its body.
+    config.on_request_end.append(check_rate_limit)
+    return service
+
+
+async def localized_names(key, language, country):
+    async with shazam_service(language=language, endpoint_country=country) as service:
         record = await service.track_about(int(key))
     if (isinstance(record, dict) and str(record.get("key")) == key and
             all(isinstance(record.get(k), str) and record[k].strip() for k in ("title", "subtitle"))):
@@ -124,6 +168,8 @@ async def check_catalog(track, player, locales, deadline, suffixes):
         timeout = (deadline - time.monotonic()) / (len(locales) - index)
         try:
             alias = await asyncio.wait_for(localized_names(track["id"], language, country), timeout)
+        except RateLimited:
+            raise
         except Exception as exc:
             problem = type(exc).__name__
             continue
@@ -211,10 +257,7 @@ class QueryTrace:
 
 
 async def identify(wav, trace=None):
-    from shazamio import Shazam
-    async with Shazam(language="en-US") as service:
-        if trace is not None:
-            trace.attach(service.http_client.trace_config)
+    async with shazam_service(language="en-US", trace=trace) as service:
         answer = await asyncio.wait_for(service.recognize(wav), timeout=QUERY_TIMEOUT_S)
     return track_info(answer)
 
@@ -268,22 +311,27 @@ class Recognition:
         deadline = time.monotonic() + QUERY_TIMEOUT_S
         match = await identify(wav, trace)
         if not match or not self.title:
-            return match, "", ""
+            return match, "", "", None
         if exact_names(match, self.title):
-            return match, "exact", ""
+            return match, "exact", "", None
         suffixes = SUFFIX_FILE.read()
         credits = Credits.compare(match, self.title, suffixes)
         if credits.conflict:
-            return match, "", "录音版本冲突"
+            return match, "", "录音版本冲突", None
         agreement = title_agreement(match, self.title, suffixes, credits)
         if agreement:
             notes = {"suffix": "配置的曲名后缀等价", "credits": "合作署名一致"}
-            return match, agreement, notes.get(agreement, "")
-        agreement, catalog_note = await self.catalog_agreement(match, suffixes, deadline)
+            return match, agreement, notes.get(agreement, ""), None
+        limited = None
+        try:
+            agreement, catalog_note = await self.catalog_agreement(match, suffixes, deadline)
+        except RateLimited as exc:
+            limited = exc
+            agreement, catalog_note = "", "本地化目录待核实"
         if agreement:
-            return match, agreement, catalog_note
+            return match, agreement, catalog_note, None
         agreement, note = credits.fallback(policy if policy is not None else DEFAULT)
-        return match, agreement, " · ".join(filter(None, (catalog_note, note)))
+        return match, agreement, " · ".join(filter(None, (catalog_note, note))), limited
 
     async def catalog_agreement(self, match, suffixes, deadline):
         locales = catalog_locales(self.title, match)
@@ -306,31 +354,34 @@ class Recognition:
         # Called under the room lock, once per appended block. No PCM copies or IO here.
         if room.recognition_busy or (self.title and self.current):
             return
+        now = time.monotonic()
+        recovering = room.recognition_retry_at is not None
+        if recovering and now < room.recognition_retry_at:
+            return
         history = room.history
         end = history.end_frame
         earliest = max(self.first_frame, history.blocks[0][2]) if history.blocks else end
         if self.quick_pending and earliest > self.first_frame:
             self.quick_pending = False
-        quick = self.quick_pending
+        quick = self.quick_pending and not (recovering and end - earliest >= WINDOW_S * rate)
         frames = (QUICK_S if quick else WINDOW_S) * rate
         if end - earliest < frames:
             return
-        now = time.monotonic()
         interval = room.policy["recognition_interval_s"]
         # A short operator polling interval must still provide distinct evidence for a double check.
         fresh_seconds = max(min(interval, WINDOW_S), WINDOW_S - 2 if self.candidate else 0)
         if not quick and self.last_end is not None and (
                 end - self.last_end < fresh_seconds * rate or now - self.last_start < interval):
             return
-        stop = self.first_frame + frames if quick else end
+        stop = self.first_frame + frames if quick and not recovering else end
         start = stop - frames
         stride = width * 2
         parts = [memoryview(pcm)[(max(start, left)-left)*stride:(min(stop, right)-left)*stride]
                  for _, pcm, left, right, *_ in history.blocks if right > start and left < stop]
-        if quick:
-            self.quick_pending = False
-        else:
+        self.quick_pending = False
+        if not quick or recovering:
             self.last_start, self.last_end = now, end
+        room.recognition_retry_at = None
         room.recognition_busy = True
         threading.Thread(target=self.run, args=(room, parts, rate, width, quick),
                          name="song-recognition", daemon=True).start()
@@ -346,10 +397,14 @@ class Recognition:
         started = time.monotonic()
         note = error = ""
         match = None
+        limited = None
         agreement = evidence = ""
         try:
-            match, agreement, evidence = asyncio.run(self.query(encode_window(parts, rate, width, quick), trace, policy))
+            match, agreement, evidence, limited = asyncio.run(self.query(encode_window(parts, rate, width, quick), trace, policy))
             outcome = "命中" if match else "未匹配"
+        except RateLimited as exc:
+            limited = exc
+            outcome = "上游限流"
         except asyncio.TimeoutError as exc:
             outcome, note = "超时", "识别超时，稍后重试"
             error = f"{type(exc).__name__} · 查询时限 {QUERY_TIMEOUT_S:g} 秒"
@@ -361,25 +416,38 @@ class Recognition:
         finished = time.monotonic()
         with room.lock:
             room.recognition_busy = False
-            if room.recognition is not self:
-                return
             if agreement == "fuzzy" and any(room.policy[k] != policy[k] for k in FUZZY_FIELDS):
                 agreement, evidence = "", "模糊匹配设置已更新，等待下一窗口"
-            if note:
+            if limited:
+                room.recognition_retry_at = limited.retry_at
+                endpoint = "本地化目录" if match else "指纹查询"
+                error = f"{endpoint} HTTP 429 · 冷却 {limited.seconds} 秒（{limited.source}）"
+                if not agreement:
+                    note = "识别限流，稍后重试"
+            current_source = room.recognition is self
+            if not current_source and not limited:
+                return
+            if current_source and note:
                 self.notice = note
                 if self.title:
                     self.candidate = None
-            else:
+            elif current_source:
                 self.receive(match, quick, agreement)
             if trace and (monitor.level == "debug" or (error and monitor.level == "errors")):
                 mode = "Quick Fetch" if quick else "完整窗口"
                 summary = f"{mode} · {outcome} · {round((finished-started)*1000)} ms"
                 details = []
                 if error:
-                    details.extend((error, f"{trace.stage} {round((finished-trace.since)*1000)} ms"))
-                elif match:
+                    details.append(error)
+                    if not limited:
+                        details.append(f"{trace.stage} {round((finished-trace.since)*1000)} ms")
+                if match:
                     summary += f" · {match['title']} - {match['artist']}"
-                    if self.title and not agreement:
+                    if not current_source:
+                        decision = "原音源已变更"
+                    elif limited and not agreement:
+                        decision = "目录限流，等待核对"
+                    elif self.title and not agreement:
                         decision = "与播放器标题不符，未采用"
                     elif quick and agreement in ("fuzzy", "partial"):
                         decision = "等待完整窗口 · 同一 ID 命中 0/2"
