@@ -379,9 +379,12 @@ class Recognition:
                 agreement = title_agreement(match, self.title)
             if not agreement:
                 match = None
+            elif agreement not in ("partial", "fingerprint"):
+                self.current, self.candidate = match, None
+                return
         if quick:
-            if match and agreement not in ("partial", "fuzzy"):
-                self.current = match
+            if agreement == "fingerprint":
+                self.candidate = match
             return
         if match and self.current and match["id"] == self.current["id"]:
             self.candidate = None
@@ -401,12 +404,22 @@ class Recognition:
             return match, "exact", "", None
         suffixes = SUFFIX_FILE.read()
         credits = Credits.compare(match, self.title, suffixes)
+        policy = DEFAULT if policy is None else policy
+        fingerprint = "fingerprint" if policy["recognition_fuzzy"] else ""
         if credits.conflict:
-            return match, "", "录音版本冲突", None
+            return match, fingerprint, "录音版本标记不同", None
         agreement = title_agreement(match, self.title, suffixes, credits)
         if agreement:
             notes = {"suffix": "配置的曲名后缀等价", "credits": "合作署名一致"}
             return match, agreement, notes.get(agreement, ""), None
+        agreement, note = credits.fallback(policy)
+        if agreement:
+            if agreement == "partial" and fingerprint:
+                agreement = "fuzzy"
+            return match, agreement, note, None
+        candidate = self.candidate
+        if fingerprint and candidate and candidate["id"] == match["id"]:
+            return match, fingerprint, note, None
         limited = None
         try:
             agreement, catalog_note = await self.catalog_agreement(match, suffixes, deadline)
@@ -415,8 +428,7 @@ class Recognition:
             agreement, catalog_note = "", "本地化目录待核实"
         if agreement:
             return match, agreement, catalog_note, None
-        agreement, note = credits.fallback(policy if policy is not None else DEFAULT)
-        return match, agreement, " · ".join(filter(None, (catalog_note, note))), limited
+        return match, fingerprint, " · ".join(filter(None, (catalog_note, note))), limited
 
     async def catalog_agreement(self, match, suffixes, deadline):
         locales = catalog_locales(self.title, match)
@@ -504,7 +516,7 @@ class Recognition:
         finished = time.monotonic()
         with room.lock:
             room.recognition_busy = False
-            if agreement == "fuzzy" and any(room.policy[k] != policy[k] for k in FUZZY_FIELDS):
+            if agreement in ("fuzzy", "fingerprint") and any(room.policy[k] != policy[k] for k in FUZZY_FIELDS):
                 agreement, evidence = "", "模糊匹配设置已更新，等待下一窗口"
             if limited:
                 room.recognition_retry_at = limited.retry_at
@@ -517,8 +529,6 @@ class Recognition:
                 return
             if current_source and note:
                 self.notice = note
-                if self.title:
-                    self.candidate = None
             elif current_source:
                 self.receive(match, quick, agreement)
             if trace and (monitor.level == "debug" or (error and monitor.level == "errors")):
@@ -537,17 +547,19 @@ class Recognition:
                         decision = "目录限流，等待核对"
                     elif self.title and not agreement:
                         decision = "与播放器标题不符，未采用"
-                    elif quick and agreement in ("fuzzy", "partial"):
+                    elif quick and agreement == "partial":
                         decision = "等待完整窗口 · 同一 ID 命中 0/2"
                     elif self.current and self.current["id"] == match["id"]:
                         decision = "已确认"
-                        if agreement in ("fuzzy", "partial"):
+                        if agreement in ("fingerprint", "partial"):
                             decision += " · 同一 ID 命中 2/2"
                         if agreement == "fuzzy":
-                            decision += " · 模糊兜底采用"
+                            decision += " · 文本佐证，单次命中采用"
+                        elif agreement == "fingerprint":
+                            decision += " · 指纹兜底采用"
                     else:
                         decision = "候选，等待二次确认"
-                        if agreement in ("fuzzy", "partial"):
+                        if agreement in ("fingerprint", "partial"):
                             decision += " · 同一 ID 命中 1/2"
                     details.extend((decision, "Shazam ID " + match["id"]))
                     details.extend(match[k] for k in ("album", "released") if match.get(k))
