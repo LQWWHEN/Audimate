@@ -17,12 +17,12 @@ from urllib.parse import parse_qs, urlsplit
 if __package__:
     from . import flac
     from .monitor import Member, Monitor, client_type
-    from .control import DEFAULT, Control, Problem
+    from .control import DEFAULT, Control, Problem, sync_ms
     from .media import Media, History
 else:  # Gunicorn imports app:create_app() from the deployment directory.
     import flac
     from monitor import Member, Monitor, client_type
-    from control import DEFAULT, Control, Problem
+    from control import DEFAULT, Control, Problem, sync_ms
     from media import Media, History
 
 WEB = Path(__file__).with_name("web")
@@ -73,7 +73,13 @@ def fields(env):
 
 
 class Room:
-    def __init__(self, development=False):
+    def __init__(self, development=False, room_id="main", *, audio_block_ms=200):
+        self.room_id = room_id
+        self.policy = DEFAULT.copy()
+        self.overrides = {}
+        if type(audio_block_ms) is not int or not 10 <= audio_block_ms <= 500 or audio_block_ms % 10:
+            raise ValueError("音频块时长须为 10–500 毫秒内的 10 的倍数")
+        self.audio_block_ms = audio_block_ms
         self.lock = threading.Lock()
         self.members = {}
         self.pending = {}
@@ -86,10 +92,28 @@ class Room:
         self.log_epoch = 0
         self.stage_since = self.last_audio = None
         self.watching = False
+        self.lease_grace_until = 0
 
-    def apply_limits(self, config):
+    def apply_limits(self, config, overrides):
+        self.policy = config.copy()
+        self.overrides = overrides.copy()
         self.history.seconds = config["history_s"]
+        self.history.block_limit = config["history_blocks"]
+        self.history.byte_limit = config["history_mib"] * 1024**2
+        now = time.monotonic()
+        if config["lease_s"] < self.lease_s and self.members:
+            self.lease_grace_until = now + config["lease_s"]
         self.lease_s = config["lease_s"]
+        if self.host:
+            self.history.prune(now, 48000 if self.host["codec"] == "opus" else self.host["rate"])
+
+    def sync_policy(self, *, reference_ms=None):
+        # A future room-level latency estimator may supply a reference once it has enough samples.
+        cap = min(self.policy["sync_max_ms"], self.overrides.get("sync_max_ms", self.policy["sync_max_ms"]))
+        default = self.overrides.get("sync_default_ms", self.policy["sync_default_ms"])
+        request = self.host.get("sync_request_ms") if self.host else None
+        return {"max_ms": cap, "effective_ms": min(default if request is None else request, cap),
+                "suggested_ms": max(1000, round(reference_ms)) if reference_ms is not None else 1000}
 
     def watch(self):
         while True:
@@ -139,6 +163,8 @@ class Room:
             member.last_pull = None
 
     def expire(self, now):
+        if now < self.lease_grace_until:
+            return
         for key, member in list(self.members.items()):
             if now - member.seen > self.lease_s:
                 self.leave(key, "连接超时")
@@ -156,7 +182,7 @@ class Room:
 
     def grant(self, key, choice):
         self.reset()
-        self.host = dict(choice, key=key, stream=secrets.token_hex(12), track=None)
+        self.host = dict(choice, key=key, stream=secrets.token_hex(12), track=None, audio_block_ms=self.audio_block_ms)
         if self.monitor.development:
             self.monitor.round_id = secrets.token_hex(12)
         self.stage_since = time.monotonic()
@@ -171,7 +197,7 @@ class Room:
         public_host = {k: v for k, v in host.items() if k != "key"} if host else None
         if host and host["track"]:
             public_host["source"] = f"{host['track']['title']} - {host['track']['artist']}"
-        return {"host": public_host,
+        return {"room_id": self.room_id, "sync_policy": self.sync_policy(), "host": public_host,
                 "hosting": mine, "pending": key in self.pending,
                 "requests": [{"id": req["id"], "name": req["name"]} for req in self.pending.values()] if mine else [],
                 "members": len(self.members), "livekit": self.media.enabled, "flac": flac.AVAILABLE}
@@ -197,11 +223,22 @@ class Room:
                 raise Problem(400, "不支持所选 Opus 码率")
             choice = dict(name=name, rate=rate, bits=bits, source=label.strip(), codec=codec, compression=compression,
                           channels=2, bitrate=bitrate if codec == "opus" else rate * bits * 2, id=secrets.token_hex(8))
+            value = data.get("sync_request_ms")
+            choice["sync_request_ms"] = None if value is None else sync_ms(value)
             if not self.host:
                 self.grant(key, choice)
             elif self.host["key"] != key and key not in self.pending:
                 self.pending[key] = choice
                 self.monitor.event("主持", f"{name} 申请主持")
+        elif action == "sync":
+            if not self.host or self.host["stream"] != data.get("stream"):
+                raise Problem(409, "主持已变更")
+            if self.host["key"] != key:
+                raise Problem(403, "仅主持可调整")
+            if "sync_request_ms" not in data:
+                raise Problem(400, "缺少阈值")
+            value = data["sync_request_ms"]
+            self.host["sync_request_ms"] = None if value is None else sync_ms(value)
         elif action == "track":
             if not self.host or self.host["stream"] != data.get("stream"):
                 raise Problem(409, "主持已变更")
@@ -261,7 +298,7 @@ class App:
                     (uid INTEGER PRIMARY KEY REFERENCES users(id));
             """)
             self.control = Control(conn)
-            self.room.apply_limits(self.control.active)
+            self.room.apply_limits(self.control.active, self.control.room_settings(conn, self.room.room_id))
             self.room.monitor.set_level(self.control.active["logging"])
             if development:
                 conn.execute("CREATE TABLE IF NOT EXISTS dev_transport_log (id INTEGER PRIMARY KEY, stamp INTEGER NOT NULL, sample TEXT NOT NULL)")
@@ -421,6 +458,9 @@ class App:
                         snapshot["timing"] = self.room.monitor.stage_summary(stream)
                         snapshot["timing"]["round_id"] = self.room.monitor.round_id if self.room.host else None
                     snapshot["service"] = self.control.snapshot(conn)
+                    snapshot["service"].update(room_id=self.room.room_id, room_overrides=self.room.overrides,
+                                               sync_policy=self.room.sync_policy(),
+                                               host_request_ms=self.room.host.get("sync_request_ms") if self.room.host else None)
                     snapshot["livekit"] = self.room.media.enabled
                     snapshot["operator"] = user[0]
                     return 200, encoded(snapshot), []
@@ -456,7 +496,7 @@ class App:
             data = fields(env)
         room_read = path == "/api/room" and method == "GET"
         stage_write = path in ("/api/stage/request", "/api/stage/leave", "/api/stage/accept",
-                               "/api/stage/reject", "/api/stage/track") and method == "POST"
+                               "/api/stage/reject", "/api/stage/track", "/api/stage/sync") and method == "POST"
         audio_request = path == "/api/audio" and method in ("GET", "POST")
         media_request = path in ("/api/media", "/api/diagnostics") and method == "POST"
         clock_read = path == "/api/clock" and method == "GET"

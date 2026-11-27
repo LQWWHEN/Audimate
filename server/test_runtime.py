@@ -36,15 +36,14 @@ class Runtime(unittest.TestCase):
         credentials = dict(name="listener",password="local-test-password")
         self.alice.request("register", credentials)
         self.alice.request("stage/request", self.choice)
-        self.assertEqual(self.ops("service/configure",dict(history_s=2, intervals=[5]))[0],409)
+        self.assertEqual(self.ops("service/configure",dict(history_s=2, intervals=[5]))[0],200)
         self.ops("service/maintenance", {})
         with self.assertRaisesRegex(OSError,"401"):
             self.alice.request("room")
         with self.assertRaisesRegex(OSError,"503"):
             self.alice.request("login",credentials)
         state = self.ops("service/configure",dict(history_s=2,intervals=[10,5]))[1]["service"]
-        self.assertEqual((state["active"]["history_s"],state["pending"]["history_s"]),(5,2))
-        self.assertEqual(self.ops("service/open",{})[0],409)
+        self.assertEqual((state["active"]["history_s"],state["pending"]["history_s"]),(2,2))
         self.assertTrue(self.ops("service/restart",{})[1]["service"]["maintenance"])
         restored = App(self.db)
         self.assertTrue(restored.control.maintenance)
@@ -92,21 +91,20 @@ class Runtime(unittest.TestCase):
         self.ops("login", dict(name="operator", password=password))
         config = dict(history_s=5, intervals=[5, 15])
         self.assertEqual(self.ops("overview")[1]["lease_s"], 20)
-        self.assertEqual(self.ops("service/configure", dict(config, lease_s=8))[0], 409)
+        self.assertEqual(self.ops("service/configure", dict(config, lease_s=8))[0], 200)
         self.ops("service/maintenance", {})
         for seconds in (5, 300, 8):
             status, snapshot = self.ops("service/configure", dict(config, lease_s=seconds))
             self.assertEqual(status, 200)
             self.assertEqual(snapshot["service"]["pending"]["lease_s"], seconds)
-            self.assertEqual(snapshot["lease_s"], 20)
+            self.assertEqual(snapshot["lease_s"], seconds)
         for invalid in (4, 301, True, "8", 8.5, None):
             with self.subTest(invalid=invalid):
                 self.assertEqual(self.ops("service/configure", dict(config, lease_s=invalid))[0], 400)
         # An older dashboard can save the other settings without reverting this one.
         saved = self.ops("service/configure", config)[1]["service"]
         self.assertEqual(saved["pending"]["lease_s"], 8)
-        self.assertIn("离线超时 8s", saved["audit"][0]["action"])
-        self.assertEqual(self.ops("service/open", {})[0], 409)
+        self.assertIn("lease_s", saved["audit"][0]["action"])
         self.assertEqual(self.ops("service/restart", {})[1]["lease_s"], 8)
         self.assertEqual(self.ops("service/open", {})[0], 200)
         self.assertEqual(App(self.db).room.lease_s, 8)
@@ -137,14 +135,73 @@ class Runtime(unittest.TestCase):
         self.assertEqual(self.ops("overview")[1]["members"][0]["name"], "listener")
         self.assertFalse(self.alice.request("room")["hosting"])
 
+    def test_hot_threshold_during_host_handoff(self):
+        password = manage(self.db, "create", "operator")
+        self.ops("login", dict(name="operator", password=password))
+        for api, name in ((self.alice, "host"), (self.bob, "listener")):
+            api.request("register", dict(name=name, password="local-test-password"))
+        room = self.alice.request("stage/request", dict(self.choice, sync_request_ms=750))
+        stream = room["host"]["stream"]
+        self.assertEqual(room["sync_policy"]["suggested_ms"], 1000)
+        self.assertEqual(self.bob.request("room")["sync_policy"]["effective_ms"], 750)
+        with self.assertRaisesRegex(OSError, "403"):
+            self.bob.request("stage/sync", {"stream": stream, "sync_request_ms": 900})
+        self.alice.request("stage/sync", {"stream": stream, "sync_request_ms": 1650})
+        hot = {"room_id": room["room_id"], "version": room["config"]["version"],
+               "room_overrides": {"sync_max_ms": 1300, "sync_default_ms": 1100}, "history_s": 3}
+        status, result = self.ops("service/configure", hot)
+        self.assertEqual(status, 200)
+        version = result["service"]["active"]["version"]
+        saved = self.ops("service/configure", dict(hot, version=version))[1]
+        self.assertEqual(saved["service"]["active"]["version"], version)
+        self.assertEqual(self.ops("service/configure", dict(hot, room_id="another"))[0], 409)
+        self.assertEqual(self.ops("service/configure", dict(hot, room_id="another", version=version))[0], 404)
+        self.assertEqual(self.ops("service/configure", hot)[0], 409)
+        self.assertEqual(self.bob.request("room")["sync_policy"]["effective_ms"], 1300)
+        self.assertEqual(self.alice.request("room")["host"]["stream"], stream)
+        restored = App(self.db).room
+        self.assertEqual(restored.sync_policy()["effective_ms"], 1100)
+        self.assertEqual(restored.sync_policy(reference_ms=750)["suggested_ms"], 1000)
+        self.assertEqual(restored.sync_policy(reference_ms=1450)["suggested_ms"], 1450)
+        self.assertEqual(restored.sync_policy(reference_ms=1450)["effective_ms"], 1100)
+        self.bob.request("stage/request", self.choice)
+        request = self.alice.request("room")["requests"][0]
+        self.alice.request("stage/accept", {"stream": stream, "id": request["id"]})
+        self.assertEqual(self.bob.request("room")["sync_policy"]["effective_ms"], 1100)
+        with self.assertRaisesRegex(OSError, "409"):
+            self.alice.request("stage/sync", {"stream": stream, "sync_request_ms": 0})
+
+    def test_shorter_lease_gives_online_host_a_heartbeat(self):
+        password = manage(self.db, "create", "operator")
+        self.ops("login", dict(name="operator", password=password))
+        self.alice.request("register", dict(name="host", password="local-test-password"))
+        stream = self.alice.request("stage/request", self.choice)["host"]["stream"]
+        room = self.app.room
+        with room.lock:
+            room.members[room.host["key"]].seen = time.monotonic() - 12
+        self.assertEqual(self.ops("service/configure", {"lease_s": 5})[0], 200)
+        self.assertEqual(self.alice.request("room")["host"]["stream"], stream)
+
+    def test_history_payload_and_eviction(self):
+        history = History(12, byte_limit=1000, block_limit=2)
+        history.append(bytes(400), 1000, 2, wire=bytes(60))
+        history.append(bytes(400), 1000, 2, wire=bytes(200))
+        self.assertEqual((history.payload_bytes, history.last_eviction), (600, "bytes"))
+        history.append(bytes(80), 1000, 2)
+        history.append(bytes(80), 1000, 2)
+        self.assertEqual((history.payload_bytes, history.last_eviction, history.available_ms(1000)),
+                         (160, "blocks", 40))
+        history.clear()
+        self.assertEqual(history.payload_bytes, 0)
+
     def test_legacy_timeout_default(self):
         active = dict(history_s=7, intervals=[5, 15], logging="errors")
         pending = dict(active, history_s=3)
         with closing(sqlite3.connect(self.db)) as conn, conn:
             conn.execute("UPDATE service SET active=?, pending=?", (json.dumps(active), json.dumps(pending)))
         restored = App(self.db)
-        self.assertEqual(restored.control.active, dict(active, lease_s=20))
-        self.assertEqual(restored.control.pending, dict(pending, lease_s=20))
+        self.assertEqual({k: restored.control.active[k] for k in active}, active)
+        self.assertEqual({k: restored.control.pending[k] for k in pending}, pending)
         self.assertEqual((restored.room.lease_s, restored.room.history.seconds), (20, 7))
 
     def test_waiting_member_expires_without_room_requests(self):

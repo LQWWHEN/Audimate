@@ -79,12 +79,14 @@ function enter(user) {
   poll(epoch);
 }
 let listening = false, playback, hostRTC, fallbackStream = "", firstRoom = true;
+let syncStream, listenerSync;
 function clearPlayback() {
   playback?.close();
   playback = null;
 }
 function stopListen() {
   listening = false;
+  syncStream = null;
   clearPlayback();
   if (listenContext) listenContext.close().catch(() => {});
   listenContext = null;
@@ -103,7 +105,11 @@ function refreshPlayback(force=false) {
     $("latency").textContent = "";
     return;
   }
-  const task = playback = new Listening(listenContext, host, transport);
+  if (syncStream !== host.stream) {
+    listenerSync = new SyncPolicy(performance.now());
+    syncStream = host.stream;
+  }
+  const task = playback = new Listening(listenContext, host, transport, listenerSync);
   $("actual").textContent = transport === "rtc" ? "LiveKit · Opus 立体声" : host.codec === "opus" ? "Opus 解码缓存" : pcmLabel(host);
   (transport === "rtc" ? task.runRTC() : task.runPCM()).catch(e => {
     if (task.closed || playback!==task) return;
@@ -162,6 +168,7 @@ function pcmLabel(host) {
   return host.compression === "flac" ? "无损 PCM · FLAC 压缩" : "无损 PCM";
 }
 function render(state) {
+  const previous = room;
   room = state;
   const h = room.host;
   if (firstRoom) {
@@ -171,6 +178,16 @@ function render(state) {
   for (const option of $("codec").options)
     option.disabled = option.value === "flac" ? !state.flac : option.value.startsWith("opus") && !room.livekit;
   $("codec").disabled = room.hosting || room.pending || requesting;
+  const field = $("hostThreshold"), policy = state.sync_policy;
+  field.max = (policy?.max_ms ?? 1800) / 1000;
+  $("syncHint").textContent = "建议 ≥ " + ((policy?.suggested_ms ?? 1000) / 1000).toFixed(1) + " 秒";
+  $("applyThreshold").hidden = !state.hosting;
+  field.disabled = state.pending || requesting || leaving;
+  if (state.hosting && (previous?.host?.stream !== h.stream ||
+      previous?.sync_policy?.effective_ms !== policy?.effective_ms ||
+      previous?.host?.sync_request_ms !== h.sync_request_ms)) {
+    field.value = h.sync_request_ms == null ? "" : policy.effective_ms / 1000;
+  } else if (previous?.hosting && !state.hosting) field.value = "";
   const intervals = state.config.intervals.slice();
   if (listening && !intervals.includes(prefs.interval)) intervals.push(prefs.interval);
   if (!intervals.includes(prefs.interval)) { prefs.interval = 5; savePrefs(); }
@@ -282,6 +299,19 @@ function sharedAudioSource(stream) {
     throw Error("无法确认音轨仅来自所选音源。请改选标签页音频，或用 Windows 客户端按进程共享。");
   return surface === "window" ? "应用窗口" : "浏览器标签页";
 }
+function thresholdValue() {
+  const field = $("hostThreshold");
+  if (!field.reportValidity()) throw Error("请检查同步阈值");
+  return field.value === "" ? null : Math.round(field.valueAsNumber * 1000);
+}
+$("applyThreshold").onclick = async () => {
+  if (!room?.hosting) return;
+  const stream = room.host.stream;
+  try {
+    const state = await api("stage/sync", {stream, sync_request_ms:thresholdValue()});
+    if (room?.host?.stream === stream) render(state);
+  } catch(e) { note(e.message); }
+};
 $("stage").onclick = async () => {
   if (requesting || leaving) return;
   if (room?.hosting) return leave();
@@ -290,6 +320,7 @@ $("stage").onclick = async () => {
   note("");
   const version = epoch;
   try {
+    const syncRequest = thresholdValue();
     const [rate, bits] = $("quality").value.split("/").map(Number);
     if (!navigator.mediaDevices?.getDisplayMedia)
       throw Error("请通过 HTTPS 在桌面 Chrome 或 Edge 中共享音频。");
@@ -332,6 +363,7 @@ $("stage").onclick = async () => {
     if (input !== chosen) return;
     const state = await api("stage/request", {
       source,
+      sync_request_ms: syncRequest,
       rate: captureContext.sampleRate,
       bits, codec: $("codec").value.startsWith("opus") ? "opus" : "pcm",
       compression: $("codec").value === "flac" ? "flac" : "none",
@@ -390,7 +422,7 @@ async function publish(stream, bits) {
   await ctx.audioWorklet.addModule("/audio-worker.js");
   if (generation !== stageGeneration) return;
   const node = new AudioWorkletNode(ctx, "stereo-packets", {
-    processorOptions: { bits },
+    processorOptions: { bits, blockMs: room.host.audio_block_ms ?? 200 },
   });
   const mute = ctx.createGain();
   mute.gain.value = 0;
@@ -399,6 +431,8 @@ async function publish(stream, bits) {
     .connect(node);
   node.connect(mute).connect(ctx.destination);
   const pending = [];
+  const blockMs = room.host.audio_block_ms ?? 200;
+  const maxPending = Math.max(1, Math.floor(400 / blockMs));
   let busy=false, dropped=0, reported=0, packetId=0;
   const host=room.host;
   async function drain() {
@@ -424,7 +458,7 @@ async function publish(stream, bits) {
           if (Number.isSafeInteger(ack.server_seq)) trace.server_seq=ack.server_seq;
         }
         const upload_ms=performance.now()-start;
-        if (trace ? trace.source_seq%10===1 || dropped || upload_ms>200 : performance.now()-reported>2000) {
+        if (trace ? trace.source_seq%10===1 || dropped || upload_ms>blockMs : performance.now()-reported>2000) {
           diagnostics(host,dropped ? "overload":"publish","pcm",{upload_ms,discarded:dropped,...(trace ? {detail:trace} : {})});
           reported=performance.now(); dropped=0;
         }
@@ -439,7 +473,7 @@ async function publish(stream, bits) {
   }
   node.port.onmessage = event => {
     if (generation!==stageGeneration) return;
-    if (pending.length>=2) {pending.shift(); dropped++; note("上传赶不上采集，已跳过旧音频。可手动降低共享音质。");}
+    if (pending.length>=maxPending) {pending.shift(); dropped++; note("上传赶不上采集，已跳过旧音频。可手动降低共享音质。");}
     const captured = clockOffset==null ? null : Date.now()+clockOffset+(event.data.startTime-ctx.currentTime)*1000;
     const data = event.data.pcm, queued = performance.now();
     packetId++;
@@ -464,6 +498,7 @@ $("sync").onclick=()=>{
   if (!playback) return;
   if (playback.lag != null && playback.lag <= 850 && !fallbackStream) {note("已接近实时位置"); return;}
   diagnostics(playback.host,"sync",playback.transport,detailedTiming() ? {detail:{phase:"manual"}} : {});
+  listenerSync = new SyncPolicy(performance.now());
   fallbackStream=""; refreshPlayback(true); note("正在同步到当前音源");
 };
 $("auto").onchange=()=>{prefs.auto=$("auto").checked; savePrefs();};

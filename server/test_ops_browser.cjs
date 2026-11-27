@@ -136,19 +136,19 @@ async function run() {
     if (service) {
       page.on("dialog",dialog=>dialog.accept());
       assert.equal(await page.inputValue("#lease"), "20");
-      assert.ok(await page.isDisabled("#lease"));
+      assert.ok(await page.isEnabled("#lease"));
       await page.selectOption("#level","errors");
       await page.click("#saveLevel");
       await page.waitForFunction(()=>latest.service.active.logging==="errors");
-      await page.click("#maintenance");
-      await page.waitForFunction(()=>latest.service.maintenance);
-      assert.equal((await host.get(url+"/api/room")).status(),401);
       await page.fill("#history","3"); await page.fill("#intervals","5, 15");
       await page.fill("#lease","8");
       await page.click("#config button");
       await page.waitForFunction(()=>latest.service.pending.history_s===3 && latest.service.pending.lease_s===8);
-      assert.equal((await snapshot()).service.active.history_s,5);
-      assert.equal((await snapshot()).lease_s,20);
+      assert.equal((await snapshot()).service.active.history_s,3);
+      assert.equal((await snapshot()).lease_s,8);
+      await page.click("#maintenance");
+      await page.waitForFunction(()=>latest.service.maintenance);
+      assert.equal((await host.get(url+"/api/room")).status(),401);
       await page.click("#restart");
       await page.waitForFunction(()=>latest.service.active.history_s===3 && latest.lease_s===8);
       await page.click("#open");

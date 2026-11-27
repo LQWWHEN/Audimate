@@ -181,7 +181,8 @@ function render(s) {
   const details = [
     ["音频格式", host ? host.rate / 1000 + " kHz / " + host.bits + "-bit / 双声道" + (host.compression==="flac" ? " · FLAC" : "") : "—"],
     ["最近上行", flowing ? host.last_audio_s + " 秒前" : "—"],
-    ["缓冲块数", s.buffer_blocks + " 块 · 上限 " + s.history_s + " 秒"],
+    ["实际缓存", (s.buffer_ms/1000).toFixed(2)+" / "+s.history_s+" 秒 · "+s.buffer_blocks+" 块 · "+(s.buffer_bytes/1048576).toFixed(2)+" MiB"],
+    ["最近淘汰原因", ({bytes:"字节预算",blocks:"块数",age:"包龄",duration:"样本时长"})[s.buffer_eviction] || "—"],
     ["当前流序号", host ? host.sequence : "—"]
   ];
   byId("streamInfo").replaceChildren(...details.map(([key, value]) => {
@@ -278,13 +279,22 @@ function renderControl(s) {
   const {maintenance,restarting,active,pending,audit} = s.service;
   byId("serviceState").textContent = restarting ? "正在重启媒体服务" : maintenance ? "维护中" : "已开放";
   byId("activeConfig").textContent = "生效缓存 " + active.history_s + " 秒 · 校准档位 " + active.intervals.join(" / ") + " 秒 · 成员离线超时 " + active.lease_s + " 秒";
-  const signature=JSON.stringify([pending,active.logging]);
+  const policy = s.service.sync_policy;
+  const hostRequest = s.service.host_request_ms;
+  byId("activeConfig").textContent += " · 有效同步阈值 "+policy.effective_ms/1000+" 秒"+
+    (hostRequest == null ? "" : "（主持设置 "+hostRequest/1000+" 秒）");
+  const overrides = s.service.room_overrides || {};
+  const signature=JSON.stringify([active.version,active.logging,overrides]);
   if (signature!==previousConfig) {
     byId("history").value=pending.history_s; byId("intervals").value=pending.intervals.join(", ");
     byId("lease").value=pending.lease_s;
+    byId("budget").value=active.history_mib; byId("blockLimit").value=active.history_blocks;
+    byId("defaultSync").value=active.sync_default_ms/1000; byId("globalCap").value=active.sync_max_ms/1000;
+    byId("roomDefault").value=overrides.sync_default_ms == null ? "" : overrides.sync_default_ms/1000;
+    byId("roomCap").value=overrides.sync_max_ms == null ? "" : overrides.sync_max_ms/1000;
     byId("level").value=active.logging; previousConfig=signature;
   }
-  for(const el of byId("config").elements) el.disabled=!maintenance;
+
   byId("maintenance").disabled=maintenance;
   byId("restart").disabled=!maintenance || restarting;
   byId("open").disabled=!maintenance || restarting || JSON.stringify(active)!==JSON.stringify(pending);
@@ -314,6 +324,12 @@ async function manage(action,data={}) {
 byId("config").onsubmit = e => {
   e.preventDefault();
   manage("configure", {
+    room_id: latest.service.room_id, version: latest.service.active.version,
+    history_mib: byId("budget").valueAsNumber, history_blocks: byId("blockLimit").valueAsNumber,
+    sync_default_ms: Math.round(byId("defaultSync").valueAsNumber*1000),
+    sync_max_ms: Math.round(byId("globalCap").valueAsNumber*1000),
+    room_overrides: {sync_default_ms: byId("roomDefault").value === "" ? null : Math.round(byId("roomDefault").valueAsNumber*1000),
+                     sync_max_ms: byId("roomCap").value === "" ? null : Math.round(byId("roomCap").valueAsNumber*1000)},
     history_s: Number(byId("history").value),
     intervals: byId("intervals").value.split(/[,，]/).map(Number),
     lease_s: Number(byId("lease").value),
@@ -321,7 +337,7 @@ byId("config").onsubmit = e => {
 };
 byId("saveLevel").onclick=()=>manage("logging",{logging:byId("level").value});
 byId("maintenance").onclick=()=>{if(confirm("进入维护将结束所有普通用户会话。继续？"))manage("maintenance");};
-byId("restart").onclick=()=>{if(confirm("现在重启并应用暂存配置？"))manage("restart");};
+byId("restart").onclick=()=>{if(confirm("现在重启房间服务？"))manage("restart");};
 byId("open").onclick=()=>manage("open");
 byId("findAccount").onsubmit=async e=>{
   e.preventDefault();

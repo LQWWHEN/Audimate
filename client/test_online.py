@@ -96,31 +96,23 @@ class UploadTests(unittest.TestCase):
 
 
 class OnlineTest(unittest.TestCase):
-    def test_sync_threshold_and_history_limit(self):
-        ui = Mock(spec=OnlineRoom)
-        ui.status = Mock()
-        ui.interval = Mock()
-        ui.interval.get.return_value = "5"
-        ui.auto = Mock()
-        ui.auto.get.return_value = True
-        ui.state = {"config": {"history_s": 5}}
-        ui.last_sync = time.monotonic() - 10
-        for lag in (1135, 1200):
-            OnlineRoom.check_listening_delay(ui, lag)
-            self.assertIn("延迟偏高", ui.status.set.call_args.args[0])
-            ui.manual_sync.assert_not_called()
-        OnlineRoom.check_listening_delay(ui, 1201)
-        ui.manual_sync.assert_called_once()
-        ui.manual_sync.reset_mock()
-        ui.last_sync = time.monotonic()
-        OnlineRoom.check_listening_delay(ui, 1201)
-        ui.auto.get.return_value = False
-        ui.last_sync -= 10
-        OnlineRoom.check_listening_delay(ui, 1201)
-        ui.manual_sync.assert_not_called()
-        ui.state["config"]["history_s"] = 1
-        OnlineRoom.check_listening_delay(ui, 1000)
-        ui.manual_sync.assert_called_once()
+    def test_threshold_backoff_uses_fresh_samples(self):
+        from .sync import SyncPolicy
+        policy = SyncPolicy(0)
+        for sec in range(5):
+            self.assertFalse(policy.observe(sec, 950, 900, 5))
+        self.assertTrue(policy.observe(5, 950, 900, 5))
+        for sec in range(6, 15):
+            self.assertFalse(policy.observe(sec, 950, 900, 5))
+        self.assertTrue(policy.observe(15, 950, 900, 5))
+        for sec in range(16, 32):
+            self.assertFalse(policy.observe(sec, 700, 900, 5))
+        self.assertEqual(policy.attempts, 0)
+        for sec in range(32, 35):
+            self.assertFalse(policy.observe(sec, 950, 900, 5))
+        self.assertFalse(policy.observe(35, 950, 850, 5))
+        self.assertFalse(policy.observe(48, 950, 850, 5))
+        self.assertFalse(policy.observe(50, None, 850, 5))
 
     def test_desktop_register_login_capture_and_receive(self):
         with tempfile.TemporaryDirectory() as tmp, ExitStack() as stack:
@@ -191,8 +183,13 @@ class OnlineTest(unittest.TestCase):
             if use_flac:
                 from server import flac
                 picker.codec.set("无损 PCM · FLAC 压缩")
+            picker.threshold.set("0.85")
             picker.action.invoke()
             until(lambda: ui.stream)
+            self.assertEqual(ui.state["sync_policy"]["effective_ms"], 850)
+            ui.host_threshold.set("1.4")
+            ui.apply_threshold()
+            until(lambda: ui.state["sync_policy"]["effective_ms"] == 1400)
             self.assertFalse(picker.winfo_manager())
             peer = API(url)
             peer_name = "peerQA_" + suffix

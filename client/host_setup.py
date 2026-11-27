@@ -1,4 +1,5 @@
 """Process and upload settings for an online hosting request."""
+import math
 import tkinter as tk
 from tkinter import ttk
 
@@ -8,6 +9,19 @@ from .processes import list_sources
 
 def format_label(fmt):
     return f"{fmt.sample_rate / 1000:g} kHz · {fmt.bits_per_sample}-bit"
+
+
+def threshold_ms(text, cap):
+    text = text.strip()
+    if text in ("", "跟随房间"):
+        return None
+    try:
+        seconds = float(text)
+        if math.isfinite(seconds) and 0 <= seconds <= cap / 1000:
+            return round(seconds * 1000)
+    except ValueError:
+        pass
+    raise ValueError(f"阈值范围 0–{cap / 1000:g} 秒")
 
 
 class HostSetup(ttk.Frame):
@@ -68,6 +82,12 @@ class HostSetup(ttk.Frame):
                                          values=("Opus 64 kbps", "Opus 128 kbps", "Opus 256 kbps", "无损 PCM"))
         self.codec_select.pack(side="left")
 
+        self.threshold = tk.StringVar(self, "跟随房间")
+        ttk.Label(upload, text="同步阈值（秒）").pack(side="left", padx=8)
+        ttk.Entry(upload, width=9, textvariable=self.threshold).pack(side="left")
+        self.hint = ttk.Label(upload)
+        self.hint.pack(side="left", padx=4)
+
         footer = ttk.Frame(self)
         footer.grid(row=8, column=0, sticky="ew", pady=(14, 0))
         footer.columnconfigure(0, weight=1)
@@ -83,6 +103,8 @@ class HostSetup(ttk.Frame):
         self.depth.trace_add("write", lambda *_: self.validate())
 
     def room_state(self, state):
+        suggested = state.get("sync_policy", {}).get("suggested_ms", 1000)
+        self.hint.configure(text=f"建议 ≥ {suggested/1000:.1f}")
         self.action.configure(text="提交申请" if state["host"] else "开始主持")
         options = ["Opus 64 kbps", "Opus 128 kbps", "Opus 256 kbps"] if state["livekit"] else []
         options.append("无损 PCM")

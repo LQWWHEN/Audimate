@@ -81,6 +81,10 @@
             <option value="44100/16">CD · 44.1 kHz / 16-bit</option>
             <option value="96000/24">录音室 · 96 kHz / 24-bit</option>
           </select>
+          <label for="hostThreshold">同步阈值（秒）</label>
+          <input type="number" step="0.001" min="0" id="hostThreshold" placeholder="跟随房间" aria-describedby="syncHint">
+          <small id="syncHint">建议 ≥ 1.0 秒</small>
+          <button id="applyThreshold" hidden>应用</button>
           <button id="stage" class="primary" disabled aria-describedby="shareHelp">主持 · 共享音频</button
           ><button id="cancel" class="quiet" hidden>取消申请</button>
         </div>

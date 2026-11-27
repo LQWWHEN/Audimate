@@ -11,7 +11,16 @@ class Problem(Exception):
         self.code, self.message = code, message
 
 
-DEFAULT = {"history_s": 5, "intervals": [5, 10, 30], "logging": "debug", "lease_s": 20}
+DEFAULT = {"history_s": 12, "intervals": [5, 10, 30], "logging": "debug", "lease_s": 20,
+           "history_mib": 64, "history_blocks": 3000, "sync_default_ms": 1200, "sync_max_ms": 1800,
+           "version": 1}
+SYNC_FIELDS = ("sync_default_ms", "sync_max_ms")
+
+
+def sync_ms(value):
+    if type(value) is not int or not 0 <= value <= 60000:
+        raise Problem(400, "同步阈值应为 0–60 秒")
+    return value
 
 
 class Control:
@@ -19,6 +28,7 @@ class Control:
         conn.executescript("""
             CREATE TABLE IF NOT EXISTS service (id INTEGER PRIMARY KEY CHECK(id=1),
                 maintenance INTEGER NOT NULL, active TEXT NOT NULL, pending TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS room_policy (room_id TEXT PRIMARY KEY, settings TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS audit (id INTEGER PRIMARY KEY, stamp INTEGER, actor TEXT, action TEXT);
             CREATE TABLE IF NOT EXISTS transport_log (id INTEGER PRIMARY KEY, stamp INTEGER NOT NULL, sample TEXT NOT NULL);
         """)
@@ -34,6 +44,53 @@ class Control:
         conn.execute("UPDATE service SET active=?, pending=? WHERE id=1",
                      (json.dumps(self.active), json.dumps(self.pending)))
         conn.commit()
+
+    def room_settings(self, conn, room_id):
+        row = conn.execute("SELECT settings FROM room_policy WHERE room_id=?", (room_id,)).fetchone()
+        return json.loads(row[0]) if row else {}
+
+    def configure(self, conn, actor, data, room):
+        if data.get("version", self.active["version"]) != self.active["version"]:
+            raise Problem(409, "配置已更新，请刷新")
+        if data.get("room_id", room.room_id) != room.room_id:
+            raise Problem(404, "房间不存在")
+        config = self.active.copy()
+        for key, low, high in (("history_s", 1, 30), ("lease_s", 5, 300),
+                               ("history_mib", 2, 1024), ("history_blocks", 1, 30000)):
+            value = data.get(key, config[key])
+            if type(value) is not int or not low <= value <= high:
+                raise Problem(400, f"{key} 超出范围 {low}–{high}")
+            config[key] = value
+        intervals = data.get("intervals", config["intervals"])
+        if (not isinstance(intervals, list) or not 1 <= len(intervals) <= 12 or 5 not in intervals or
+                any(type(i) is not int or not 1 <= i <= 300 for i in intervals)):
+            raise Problem(400, "同步档位须含 5 秒，范围为 1–300 秒")
+        config["intervals"] = sorted(set(intervals))
+        for key in SYNC_FIELDS:
+            config[key] = sync_ms(data.get(key, config[key]))
+        before = self.room_settings(conn, room.room_id)
+        overrides = before.copy()
+        changes = data.get("room_overrides", {})
+        if not isinstance(changes, dict) or any(k not in SYNC_FIELDS for k in changes):
+            raise Problem(400, "房间配置无效")
+        for key, value in changes.items():
+            if value is None:
+                overrides.pop(key, None)
+            else:
+                overrides[key] = sync_ms(value)
+        if config == self.active and overrides == before and self.pending == self.active:
+            return
+        delta = {k: [self.active[k], v] for k, v in config.items() if v != self.active[k]}
+        if overrides != before:
+            delta["room_overrides"] = [before, overrides]
+        config["version"] += 1
+        payload = json.dumps(config)
+        conn.execute("UPDATE service SET active=?, pending=? WHERE id=1", (payload, payload))
+        conn.execute("INSERT OR REPLACE INTO room_policy VALUES(?,?)", (room.room_id, json.dumps(overrides)))
+        self.audit(conn, actor, f"configure v{config['version']} · {room.room_id} · " + json.dumps(delta, ensure_ascii=False))
+        conn.commit()
+        self.active, self.pending = config, config.copy()
+        room.apply_limits(config, overrides)
 
     def snapshot(self, conn):
         trigger = os.environ.get("AUDIMATE_RESTART_FILE")
@@ -59,26 +116,18 @@ class Control:
             self.active = dict(self.active, logging=level)
             self.pending = dict(self.pending, logging=level)
             room.monitor.set_level(level)
+        elif action == "configure":
+            self.configure(conn, actor, data, room)
+            return
         elif not self.maintenance:
             raise Problem(409, "请先进入维护模式")
-        elif action == "configure":
-            history, intervals = data.get("history_s"), data.get("intervals")
-            if type(history) is not int or not 1 <= history <= 30:
-                raise Problem(400, "历史缓存应为 1–30 秒")
-            if (not isinstance(intervals, list) or not 1 <= len(intervals) <= 12 or 5 not in intervals or
-                    any(type(i) is not int or not 1 <= i <= 300 for i in intervals)):
-                raise Problem(400, "同步档位应为 1–300 秒的整数，须包含默认 5 秒")
-            lease = data.get("lease_s", self.pending["lease_s"])
-            if type(lease) is not int or not 5 <= lease <= 300:
-                raise Problem(400, "成员离线超时应为 5–300 的整数秒")
-            self.pending = dict(self.pending, history_s=history, intervals=sorted(set(intervals)), lease_s=lease)
         elif action == "restart":
             trigger = os.environ.get("AUDIMATE_RESTART_FILE")
             if trigger:
                 Path(trigger).touch()
             room.reset()
             self.active = self.pending.copy()
-            room.apply_limits(self.active)
+            room.apply_limits(self.active, self.room_settings(conn, room.room_id))
         elif action == "open":
             if self.active != self.pending:
                 raise Problem(409, "请先重启服务，使暂存配置生效")
@@ -91,9 +140,7 @@ class Control:
         conn.execute("UPDATE service SET maintenance=?,active=?,pending=? WHERE id=1",
                      (self.maintenance, json.dumps(self.active), json.dumps(self.pending)))
         detail = action
-        if action == "configure":
-            detail += f" · 缓存 {self.pending['history_s']}s · 校准 {self.pending['intervals']} · 离线超时 {self.pending['lease_s']}s"
-        elif action == "logging":
+        if action == "logging":
             detail += " · " + self.active["logging"]
         self.audit(conn, actor, detail)
 

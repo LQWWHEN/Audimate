@@ -144,20 +144,19 @@ async function run() {
       check.reported = performance.now();
       try {
         prefs.auto = true; prefs.interval = 5; room.config.history_s = 5;
-        check.lastCheck -= 10000;
-        const results = [sample(1135), $("latency").textContent.includes("延迟偏高"), sample(1200),
-                         sample(1201), sample(1201)];
-        prefs.auto = false; check.lastCheck -= 10000;
-        results.push(sample(1201));
+        const policy = new SyncPolicy(0);
+        const results = [sample(1135), $("latency").textContent.includes("延迟偏高"), sample(1200)];
+        for (let t = 0; t <= 5000; t += 1000) results.push(policy.observe(t, 950, 850, 5));
+        prefs.auto = false;
         room.config.history_s = 1;
-        results.push(sample(1000));
+        results.push(sample(6000));
         return results;
       } finally {
         prefs.auto = original.auto; prefs.interval = original.interval; room.config.history_s = original.history;
         check.close();
       }
     });
-    assert.deepEqual(syncChecks, [false, true, false, true, false, false, true]);
+    assert.deepEqual(syncChecks, [false, true, false, false, false, false, false, false, true, false]);
     const originalPicker = windowPlayers && await host.evaluateHandle(() => navigator.mediaDevices.getDisplayMedia);
     // Simulate chooser outcomes, then use the native picker for the host when requested.
     for (const page of [host, listener])
@@ -388,6 +387,9 @@ async function run() {
       await host.screenshot({path:path.join(process.env.AUDIMATE_SCREENSHOTS,"room.png"),fullPage:true});
       await listener.screenshot({path:path.join(process.env.AUDIMATE_SCREENSHOTS,"listener-mobile.png"),fullPage:true});
     }
+    await host.fill("#hostThreshold", "0.85");
+    await host.click("#applyThreshold");
+    await listener.waitForFunction(() => room.sync_policy.effective_ms === 850);
     await listener.click("#stage");
     await host.getByRole("button", { name: "拒绝" }).click();
     await listener.waitForFunction(

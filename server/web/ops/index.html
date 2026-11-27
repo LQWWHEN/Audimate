@@ -60,7 +60,13 @@
         <button id="saveLevel">应用日志级别</button></div>
         <p id="activeConfig"></p><form id="config" class="controls"><label>历史上限（秒）<input id="history" type="number" min="1" max="30" required></label>
         <label>成员离线超时（秒）<input id="lease" type="number" min="5" max="300" step="1" required></label>
-        <label>校准档位（秒，逗号分隔）<input id="intervals" required></label><button>暂存配置</button></form>
+        <label>校准档位（秒，逗号分隔）<input id="intervals" required></label><label>缓存预算（MiB）<input id="budget" type="number" min="2" max="1024" required></label>
+        <label>最多缓存块<input id="blockLimit" type="number" min="1" max="30000" required></label>
+        <label>默认同步阈值（秒）<input id="defaultSync" type="number" min="0" max="60" step="0.001" required></label>
+        <label>全站上限（秒）<input id="globalCap" type="number" min="0" max="60" step="0.001" required></label>
+        <label>本房默认（秒）<input id="roomDefault" type="number" min="0" max="60" step="0.001" placeholder="继承"></label>
+        <label>本房上限（秒）<input id="roomCap" type="number" min="0" max="60" step="0.001" placeholder="继承"></label>
+        <button>应用配置</button></form>
         <div class="controls"><button id="maintenance">停机维护</button><button id="restart">重启房间服务</button><button id="open">开放房间</button></div>
         <output id="opResult" role="status"></output></section>
       <section class="card"><div class="card-head"><h2>账号管理</h2></div><form id="findAccount" class="controls"><label>账号名<input id="query" maxlength="32" autocomplete="off"></label><button>查询账号</button></form>

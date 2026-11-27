@@ -10,12 +10,10 @@ import tkinter as tk
 from tkinter import ttk
 
 from .network import API, default_server, AudioListener, AudioUpload, RoomError
-from .host_setup import HostSetup
+from .host_setup import HostSetup, threshold_ms
 from .processes import current_track
 from .sharing import ProcessCapture, ShareSelection
-
-
-AUTO_SYNC_DELAY_MS = 1200
+from .sync import SyncPolicy
 
 
 class OnlineRoom:
@@ -51,6 +49,7 @@ class OnlineRoom:
                 saved = {}
         except (OSError, ValueError):
             saved = {}
+        self.sync_stream = None
         self.want_listen = False
         self.fallback_stream = ""
         self.last_sync = self.retry_at = 0
@@ -135,6 +134,13 @@ class OnlineRoom:
         self.settings_button = ttk.Button(buttons, text="收听设置", command=self.toggle_preferences)
         self.settings_button.pack(side="left")
         prefs.grid_remove()
+        self.threshold_bar = bar = ttk.Frame(self.frame)
+        bar.grid(row=7, columnspan=2, sticky="w")
+        ttk.Label(bar, text="同步阈值（秒）").pack(side="left")
+        self.host_threshold = tk.StringVar(self.window, "跟随房间")
+        ttk.Entry(bar, width=10, textvariable=self.host_threshold).pack(side="left", padx=6)
+        ttk.Button(bar, text="应用", command=self.apply_threshold).pack(side="left")
+        bar.grid_remove()
         self.notice(6)
         self.status.set("正在读取房间…")
         self.next_poll = 0
@@ -170,6 +176,7 @@ class OnlineRoom:
     def logged_out(self, _):
         self.stop_stream()
         self.stop_listen()
+        self.sync_stream = None
         self.want_listen = False
         self.name = self.stream = ""
         self.selection = self.state = None
@@ -197,9 +204,11 @@ class OnlineRoom:
     def manual_sync(self, reason="manual"):
         if not self.listener:
             return
-        if self.listener.lag is not None and self.listener.lag < 850 and not self.fallback_stream:
+        if reason == "manual" and self.listener.lag is not None and self.listener.lag < 850 and not self.fallback_stream:
             self.status.set("已接近实时位置")
             return
+        if reason == "manual":
+            self.sync_policy = SyncPolicy(time.monotonic())
         metrics = {"detail":{"phase":reason}} if self.api.timing else {}
         self.api.report(self.listener.host["stream"], "sync", "rtc" if isinstance(self.listener,RTCWorker) else "pcm", metrics)
         self.stop_listen()
@@ -210,12 +219,33 @@ class OnlineRoom:
     def check_listening_delay(self, lag):
         if lag > 1000:
             self.status.set(f"接收延迟偏高（约 {lag:.0f} ms），可手动同步")
-        if (lag >= self.state["config"]["history_s"] * 1000 or
-                (lag > AUTO_SYNC_DELAY_MS and self.auto.get() and
-                 time.monotonic() - self.last_sync >= int(self.interval.get()))):
-            self.manual_sync("history" if lag >= self.state["config"]["history_s"] * 1000 else "auto")
+        sample = self.listener.sync_sample
+        if sample:
+            stamp, estimate = sample
+            threshold = self.state.get("sync_policy", {}).get("effective_ms", 1200)
+            if self.sync_policy.observe(stamp, estimate if self.auto.get() else None,
+                                        threshold, int(self.interval.get())):
+                self.manual_sync("auto")
+
+    def apply_threshold(self):
+        if not self.state or not self.state["hosting"]:
+            return
+        stream = self.state["host"]["stream"]
+        try:
+            value = threshold_ms(self.host_threshold.get(), self.state["sync_policy"]["max_ms"])
+        except ValueError as exc:
+            self.status.set(str(exc))
+            return
+        def send():
+            if self.state and self.state["hosting"] and self.state["host"]["stream"] == stream:
+                self.submit(lambda: self.api.request("stage/sync", {"stream": stream, "sync_request_ms": value}), self.render)
+        if self.polling:
+            self.after_poll = send
+        else:
+            send()
 
     def toggle_listen(self):
+        self.sync_stream = None
         self.want_listen = not self.want_listen
         self.fallback_stream = ""
         if not self.want_listen:
@@ -233,6 +263,7 @@ class OnlineRoom:
             return
         if not self.picker:
             self.picker = HostSetup(self.window, self.request_stage, self.show_room)
+        self.picker.threshold.set("跟随房间")
         self.picker.room_state(self.state)
         self.picker.refresh()
         self.frame.pack_forget()
@@ -260,9 +291,14 @@ class OnlineRoom:
         except ValueError:
             self.picker.validate()
             return
+        try:
+            sync_request = threshold_ms(self.picker.threshold.get(), self.state.get("sync_policy", {}).get("max_ms", 1800))
+        except ValueError as exc:
+            self.picker.message.set(str(exc))
+            return
         self.selection = ShareSelection(src, fmt)
         codec = self.picker.codec.get()
-        payload = dict(source=src.name, rate=fmt.sample_rate, bits=fmt.bits_per_sample,
+        payload = dict(sync_request_ms=sync_request, source=src.name, rate=fmt.sample_rate, bits=fmt.bits_per_sample,
                        codec="opus" if self.state["livekit"] and codec.startswith("Opus") else "pcm")
         if payload["codec"]=="opus":
             payload["bitrate"] = int(codec.split()[1])*1000
@@ -334,6 +370,9 @@ class OnlineRoom:
                               or state["hosting"] or rtc != isinstance(self.listener, RTCWorker)):
             self.stop_listen()
         if host and self.want_listen and not state["hosting"] and not self.listener and time.monotonic() >= self.retry_at:
+            if self.sync_stream != host["stream"]:
+                self.sync_stream = host["stream"]
+                self.sync_policy = SyncPolicy(time.monotonic())
             self.listener = RTCWorker(self.api, host) if rtc else AudioListener(self.api, host)
             self.last_sync = time.monotonic()
             self.listener.start()
@@ -368,6 +407,15 @@ class OnlineRoom:
         self.sync.configure(state="normal" if self.listener else "disabled")
         self.stage.configure(text="下台" if state["hosting"] else "取消申请" if self.pending else "申请主持" if host else "开始主持",
                              state="normal")
+        if state["hosting"] and state.get("sync_policy"):
+            self.threshold_bar.grid()
+            old_host = (previous or {}).get("host") or {}
+            if (old_host.get("stream") != host["stream"] or old_host.get("sync_request_ms") != host.get("sync_request_ms")
+                    or previous.get("sync_policy") != state["sync_policy"]):
+                value = state["sync_policy"]["effective_ms"] / 1000
+                self.host_threshold.set("跟随房间" if host.get("sync_request_ms") is None else f"{value:g}")
+        else:
+            self.threshold_bar.grid_remove()
         if self.capture:
             self.levels.grid()
         else:

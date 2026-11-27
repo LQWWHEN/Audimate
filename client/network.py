@@ -189,8 +189,12 @@ class AudioUpload(threading.Thread):
         self.host = host or {}
         self.api, self.stream = api, stream
         self.cancel = threading.Event()
+        self.rate = self.host.get("rate", 48000)
+        self.frame_bytes = self.host.get("bits", 16) // 8 * 2
+        self.block_ms = self.host.get("audio_block_ms", 200)
+        self.packet_bytes = round(self.rate * self.block_ms / 1000) * self.frame_bytes
         self.buffer = bytearray()
-        self.packets = queue.Queue(2)
+        self.packets = queue.Queue(max(1, 400 // self.block_ms))
         self.dropped = 0
         self.notice = ""
         self.error = ""
@@ -202,7 +206,7 @@ class AudioUpload(threading.Thread):
         if not self.buffer and self.api.timing:
             self.pack_start = time.monotonic()
         self.buffer.extend(pcm)
-        if len(self.buffer) < len(pcm) * 20:
+        if len(self.buffer) < self.packet_bytes:
             return
         if self.packets.full():
             try:
@@ -222,7 +226,8 @@ class AudioUpload(threading.Thread):
             if hasattr(block, "capture_read_ms"):
                 detail["capture_read_ms"] = block.capture_read_ms
         self.pack_start = 0
-        self.packets.put_nowait((bytes(self.buffer), time.time()*1000-200, queued, detail))
+        duration_ms = len(self.buffer) * 1000 / (self.rate * self.frame_bytes)
+        self.packets.put_nowait((bytes(self.buffer), time.time()*1000-duration_ms, queued, detail))
         self.buffer.clear()
 
     def run(self):
@@ -285,7 +290,7 @@ class AudioUpload(threading.Thread):
             reconnecting = False
             sampled = detail["source_seq"] % 10 == 1 if detail else time.monotonic()-reported >= 2
             upload_ms = (time.monotonic()-start)*1000
-            if sampled or (detail and (upload_ms > 200 or self.dropped)):
+            if sampled or (detail and (upload_ms > self.block_ms or self.dropped)):
                 metrics = dict(upload_ms=upload_ms, discarded=self.dropped)
                 if detail:
                     metrics["detail"] = detail
@@ -301,8 +306,9 @@ class AudioListener(threading.Thread):
         self.api, self.host = api, host
         self.cancel = threading.Event()
         self.error = self.notice = ""
-        self.packets = queue.Queue(4)
+        self.packets = queue.Queue(max(1, 800 // host.get("audio_block_ms", 200)))
         self.lag = None
+        self.sync_sample = None
 
     def play(self):
         rate, bits = (48000, 16) if self.host.get("codec") == "opus" else (self.host["rate"], self.host["bits"])
@@ -326,6 +332,7 @@ class AudioListener(threading.Thread):
                     buffered = self.packets.qsize()*len(pcm)*1000/(rate*bits/8*2)
                     timeline = behind + (time.monotonic()-fetched)*1000
                     self.lag = time.time()*1000+self.api.offset-captured if captured is not None else timeline
+                    self.sync_sample = (time.monotonic(), self.lag)
                     if detail is not None:
                         detail["play_queue_ms"] = (time.monotonic()-fetched)*1000
                     with timed(detail, "output", "device_ms"):
@@ -391,11 +398,6 @@ class AudioListener(threading.Thread):
                             pcm = decode(pcm, self.host["rate"], self.host["bits"])
                         fetched = time.monotonic()
                     if headers.get("X-Reset") == "1":
-                        while not self.packets.empty():
-                            try:
-                                self.packets.get_nowait()
-                            except queue.Empty:
-                                break
                         self.notice = "已到缓存边界，正在重新同步"
                     seq = new_seq
                     captured = headers.get("X-Captured-Ms")

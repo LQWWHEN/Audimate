@@ -20,24 +20,43 @@ else:
 
 
 class History:
-    def __init__(self, seconds):
+    def __init__(self, seconds, byte_limit=64 * 1024**2, block_limit=3000):
+        self.byte_limit = byte_limit
+        self.block_limit = block_limit
         self.seconds = seconds
         self.clear()
 
     def clear(self):
         self.blocks = deque()
-        self.end_frame = self.sequence = 0
+        self.end_frame = self.sequence = self.payload_bytes = 0
+        self.last_eviction = None
 
     def prune(self, now, rate):
-        while self.blocks and (now - self.blocks[0][4] >= self.seconds or
-                               self.end_frame - self.blocks[0][2] > rate * self.seconds or len(self.blocks) > 3000):
+        while self.blocks:
+            oldest = self.blocks[0]
+            if self.payload_bytes > self.byte_limit:
+                reason = "bytes"
+            elif len(self.blocks) > self.block_limit:
+                reason = "blocks"
+            elif now - oldest[4] >= self.seconds:
+                reason = "age"
+            elif self.end_frame - oldest[2] > rate * self.seconds:
+                reason = "duration"
+            else:
+                break
             self.blocks.popleft()
+            self.payload_bytes -= len(oldest[1]) + len(oldest[7] or b"")
+            self.last_eviction = reason
+
+    def available_ms(self, rate):
+        return round((self.end_frame - self.blocks[0][2]) * 1000 / rate) if self.blocks else 0
 
     def append(self, pcm, rate, width, captured=None, trace=None, *, wire=None):
         now = time.monotonic()
         start = self.end_frame
         self.end_frame += len(pcm) // (2 * width)
         self.sequence += 1
+        self.payload_bytes += len(pcm) + len(wire or b"")
         self.blocks.append((self.sequence, pcm, start, self.end_frame, now, captured, trace, wire))
         self.prune(now, rate)
 
@@ -149,7 +168,7 @@ class Media:
                 if not buffer:
                     start = time.monotonic()
                 buffer.extend(event.frame.data.cast("B"))
-                if len(buffer) >= 38400:
+                if len(buffer) >= 48000 * 4 * host["audio_block_ms"] // 1000:
                     with room.lock:
                         if not room.host or room.host["stream"] != stream:
                             return

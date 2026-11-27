@@ -3,7 +3,7 @@ class StereoPackets extends AudioWorkletProcessor {
     super();
     this.width = options.processorOptions.bits / 8;
     this.scale = 2 ** (this.width * 8 - 1);
-    this.packetBytes = Math.round(sampleRate / 5) * 2 * this.width;
+    this.packetBytes = Math.round(sampleRate * (options.processorOptions.blockMs ?? 200) / 1000) * 2 * this.width;
     this.packet = new DataView(new ArrayBuffer(this.packetBytes));
     this.pos = 0;
   }

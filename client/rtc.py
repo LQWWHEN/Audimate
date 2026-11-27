@@ -16,6 +16,7 @@ class RTCWorker(threading.Thread):
         self.error = self.notice = ""
         self.dropped = 0
         self.subscribed = False
+        self.sync_sample = None
         self.lag = None
         self.timing = {}
 
@@ -145,6 +146,7 @@ class RTCWorker(threading.Thread):
                             if count > 0:
                                 self.lag = (row.jitter_buffer_delay-previous[0])*1000/count
                                 metrics["buffer_ms"] = self.lag
+                            self.sync_sample = (time.monotonic(), metrics.get("rtcp_lag_ms") if count > 0 else None)
                             if "rtcp_lag_ms" in metrics:
                                 self.lag = metrics["rtcp_lag_ms"]
                             previous = row.jitter_buffer_delay, row.jitter_buffer_emitted_count

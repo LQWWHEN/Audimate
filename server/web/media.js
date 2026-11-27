@@ -1,7 +1,37 @@
 "use strict";
 LivekitClient.setLogLevel("error");
 const prefsKey = "audimate.listen.v1";
-const autoSyncDelayMs = 1200;
+class SyncPolicy {
+  constructor(now) {
+    this.lastAttempt = now;
+    this.attempts = 0;
+    this.lastSample = this.highSince = this.stableSince = this.threshold = null;
+  }
+  observe(now, lag, threshold, intervalSeconds) {
+    if (this.threshold !== threshold || this.lastSample === null || now - this.lastSample > 3000)
+      this.highSince = this.stableSince = null;
+    this.lastSample = now;
+    this.threshold = threshold;
+    if (!Number.isFinite(lag)) {
+      this.highSince = this.stableSince = null;
+      return false;
+    }
+    if (lag <= threshold) {
+      this.highSince = null;
+      this.stableSince = lag <= 1000 ? (this.stableSince ?? now) : null;
+      if (this.stableSince !== null && now - this.stableSince >= 15000) this.attempts = 0;
+      return false;
+    }
+    this.stableSince = null;
+    this.highSince ??= now;
+    const wait = 1000 * Math.min(Math.max(intervalSeconds, 60), intervalSeconds * 2 ** this.attempts);
+    if (now - this.highSince < 3000 || now - this.lastAttempt < wait) return false;
+    this.lastAttempt = now;
+    this.highSince = null;
+    this.attempts = Math.min(6, this.attempts + 1);
+    return true;
+  }
+}
 let prefs = {auto: true, interval: 5, receive: "opus"};
 try { Object.assign(prefs, JSON.parse(localStorage.getItem(prefsKey) || "{}")); } catch {}
 function savePrefs() {
@@ -61,7 +91,9 @@ async function rtcMetrics(track) {
       values.rtt_ms = row.currentRoundTripTime * 1000;
     if (row.type === "inbound-rtp") {
       values.bytes = row.bytesReceived;
-      values.sender_time_ms = row.estimatedPlayoutTimestamp;
+      if (row.estimatedPlayoutTimestamp !== track.lastPlayoutTimestamp)
+        values.sender_time_ms = row.estimatedPlayoutTimestamp;
+      track.lastPlayoutTimestamp = row.estimatedPlayoutTimestamp;
       values.lost = row.packetsLost;
       if (row.jitter != null) values.jitter_ms = row.jitter * 1000;
       if (row.jitterBufferEmittedCount > 0) {
@@ -89,10 +121,10 @@ async function rtcMetrics(track) {
 }
 
 class Listening {
-  constructor(ctx, host, transport) {
+  constructor(ctx, host, transport, sync = new SyncPolicy(performance.now())) {
     this.ctx = ctx; this.host = host; this.transport = transport;
     this.gain = ctx.createGain(); this.gain.connect(ctx.destination);
-    this.lastCheck = performance.now();
+    this.sync = sync;
     this.reported = 0; this.underruns = 0;
     this.queued = new Set();
   }
@@ -113,17 +145,14 @@ class Listening {
     else $("latency").textContent = metrics.buffer_ms == null ? "等待延迟样本" : "接收缓冲 " + Math.round(metrics.buffer_ms) + " ms";
     if (lag > 1000) $("latency").textContent += " · 延迟偏高，可手动同步";
     const detail=metrics.detail, late=detail?.late_ms>0;
-    const resync = lag >= room.config.history_s * 1000 || prefs.auto && lag > autoSyncDelayMs && now-this.lastCheck >= prefs.interval*1000;
+    const estimated = metrics.playout_ms ?? metrics.rtcp_lag_ms ?? metrics.timeline_ms;
+    const resync = this.sync.observe(now, prefs.auto ? estimated : null, room.sync_policy?.effective_ms ?? 1200, prefs.interval);
     if (detail && resync && this.transport==="pcm" && this.queued.size) detail.skipped_playback=1;
     if (late || (detail?.source_seq != null ? detail.source_seq%10===1 : now-this.reported >= 2000)) {
       diagnostics(this.host, late ? "gap" : "play", this.transport, metrics);
       this.reported = now;
     }
-    if (resync) {
-      this.lastCheck = now;
-      return true;
-    }
-    return false;
+    return resync;
   }
   async runRTC() {
     const sess = this.rtc = rtcSession();
@@ -167,7 +196,7 @@ class Listening {
   }
   resync() {
     if (detailedTiming()) diagnostics(this.host,"sync",this.transport,
-      {detail:{phase:this.lag >= room.config.history_s*1000 ? "history" : "auto"}});
+      {detail:{phase:"auto"}});
     refreshPlayback(true);
   }
   async runPCM() {
@@ -227,10 +256,7 @@ class Listening {
       if (trace) detail.decode_ms = performance.now()-decodeStart;
       const age = captured && clockOffset != null ? Date.now()+clockOffset-Number(captured) : null;
       const mediaAge = Number(response.headers.get("X-Behind-Ms"));
-      if (response.headers.get("X-Reset") === "1") {
-        for (const src of this.queued) src.stop();
-        this.queued.clear(); next=0;
-      }
+      // Already scheduled audio can finish while the next block resumes near live.
       if (next < ctx.currentTime) {
         if (next && trace) detail.late_ms = (ctx.currentTime-next)*1000;
         if (next) this.underruns++;
@@ -244,7 +270,7 @@ class Listening {
       metrics.timeline_ms=mediaAge+metrics.buffer_ms;
       if (age != null) Object.assign(metrics,{playout_ms:Math.max(0,age+metrics.buffer_ms), clock_error_ms:clockError});
       this.pendingTiming=null;
-      if (this.observe(metrics) && this.queued.size) { this.resync(); return; }
+      if (this.observe(metrics)) { this.resync(); return; }
       const source=ctx.createBufferSource(); source.buffer=buffer; source.connect(this.gain);
       this.queued.add(source); source.onended=()=>this.queued.delete(source);
       source.start(next); next+=buffer.duration;
