@@ -8,7 +8,7 @@ Rectangle {
     required property var model
     readonly property var v: model.view
     height: shell.portrait ? 48 : 56
-    color: "#181b2c"
+    color: shell.hasBackdrop ? Qt.rgba(.09, .11, .17, .80) : "#181b2c"
     function focusSettings() { localButton.forceActiveFocus() }
     function toggleMax() {
         if (shell.visibility === Window.Maximized) shell.showNormal()

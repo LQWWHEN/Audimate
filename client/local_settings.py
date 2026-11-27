@@ -9,7 +9,7 @@ from server import spectrum_config
 from .sync import threshold_ms
 
 
-DEFAULTS = dict(delay=50, motion="system", rate=48000, bits=16, codec="FLAC",
+DEFAULTS = dict(delay=50, motion="system", coverBackground=True, rate=48000, bits=16, codec="FLAC",
                 recognize=False, style="pop", threshold="", receive="Opus", auto=True, interval=5)
 
 
@@ -34,7 +34,7 @@ def validate(values):
         raise ValueError("采样率须为 8000 至 192000 Hz 之间的整百数，位深可选 16、24 或 32 bit。") from exc
     if not 0 <= data["delay"] <= 200 or not 1 <= data["interval"] <= 300:
         raise ValueError("请检查音画延迟和自动同步间隔。")
-    if any(type(data[k]) is not bool for k in ("auto", "recognize")) or not isinstance(data["threshold"], str):
+    if any(type(data[k]) is not bool for k in ("auto", "recognize", "coverBackground")) or not isinstance(data["threshold"], str):
         raise ValueError("设置值无效。")
     # Room-specific caps are applied when the host requests the stage.
     threshold_ms(data["threshold"], 60000)
