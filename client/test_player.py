@@ -78,6 +78,42 @@ class AnalysisTests(unittest.TestCase):
 
 
 class RoomTests(unittest.TestCase):
+    def test_metadata_clearance_with_both_rails_populated(self):
+        os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
+        QQuickStyle.setStyle("Material")
+        app = QGuiApplication.instance() or QGuiApplication([])
+        model = RoomView(DEFAULT_DLL)
+        model.clock.stop()
+        engine, window = build_window(model)
+        try:
+            model.view_data.update(entered=True, host="東京放送局", title="紅葉の夜 · L’Été / 봄날",
+                                   artist="김민서", album="现场錄音", candidate="東京の夜 · 봄날",
+                                   recognitionNotice="正在核对识别结果", shared="FLAC   192 kHz / 24 bit",
+                                   received="主持本机采集", delay=1500, requests=[dict(name="听众甲", id="x")])
+            model.changed.emit()
+            host = window.findChild(QObject,"hostRail")
+            audio = window.findChild(QObject,"audioRail")
+            song = window.findChild(QObject,"songInfo")
+            for portrait in (False, True):
+                with self.subTest(portrait=portrait):
+                    window.setProperty("portrait",portrait)
+                    window.resize(window.minimumWidth(),window.minimumHeight())
+                    QTest.qWait(80)
+                    self.assertEqual(host.y(),audio.y())
+                    self.assertAlmostEqual(host.x()+host.width()+audio.x(),window.width())
+                    self.assertEqual(host.childItems()[1].y(),audio.childItems()[1].y())
+                    if portrait:
+                        self.assertLessEqual(song.y()+song.height(),host.y())
+                    else:
+                        self.assertLess(host.x()+host.width(),song.x())
+                        self.assertLess(song.x()+song.width(),audio.x())
+                    for rail in (host,audio):
+                        self.assertLessEqual(rail.y()+rail.height(),rail.parentItem().height()+1)
+        finally:
+            model.close()
+            engine.deleteLater()
+            QCoreApplication.sendPostedEvents(None,QEvent.DeferredDelete)
+
     def test_qml_capture_handoff_and_local_override(self):
         os.environ.setdefault("QT_QPA_PLATFORM","offscreen")
         QQuickStyle.setStyle("Material")

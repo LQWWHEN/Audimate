@@ -47,6 +47,7 @@ def main():
 
     vendor = ROOT/"server"/"web"/"vendor"
     data = [(ROOT/"client"/"qml", "client/qml"),
+            (ROOT/"client"/"fonts", "client/fonts"),
             (ROOT/"client"/"licenses"/"qt", "licenses/Qt"),
             (vendor/"flac-1.5.0.wasm", "server/web/vendor"),
             (vendor/"flac-LICENSE.txt", "licenses/flac"),
