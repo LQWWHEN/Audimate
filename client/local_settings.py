@@ -9,13 +9,14 @@ from server import spectrum_config
 from .sync import threshold_ms
 
 
-DEFAULTS = dict(delay=50, motion="system", coverBackground=True, rate=48000, bits=16, codec="FLAC",
+DEFAULTS = dict(delay=50, motion="system", coverBackground=True, closeAction="ask", rate=48000, bits=16, codec="FLAC",
                 recognize=False, style="pop", threshold="", receive="Opus", auto=True, interval=5)
 
 
 def validate(values):
     data = {key: values.get(key, value) for key, value in DEFAULTS.items()}
     for key, choices in (
+        ("closeAction", ("ask", "tray", "exit")),
         ("motion", ("system", "full", "reduced")), ("style", ("pop", "heavy", "light")),
         ("codec", ("PCM", "FLAC", "Opus 64", "Opus 128", "Opus 256")),
         ("receive", ("Opus", "无损 PCM")),

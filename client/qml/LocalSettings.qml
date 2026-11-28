@@ -14,6 +14,9 @@ FocusScope {
     readonly property bool showDisc: visible && roomModel.view.entered
     signal finished()
 
+    function loadCloseAction(action) {
+        closeAction.currentIndex = closeAction.actions.indexOf(action)
+    }
     function load() {
         const prefs = roomModel.localDefaults
         error = ""
@@ -22,6 +25,7 @@ FocusScope {
         spectrumEdited = false
         delay.value = prefs.delay
         coverBackground.checked = prefs.coverBackground
+        loadCloseAction(prefs.closeAction)
         motion.currentIndex = ["system","full","reduced"].indexOf(prefs.motion)
         editor.draft = roomModel.view.profile
         host.load(prefs)
@@ -43,6 +47,7 @@ FocusScope {
             auto: autoSync.checked, interval: intervalChoices[interval.currentIndex]
         })
         const prefs = roomModel.localDefaults
+        if (windowsTray) values.closeAction = closeAction.actions[closeAction.currentIndex]
         const prefsEdited = Object.keys(values).some(key => values[key] !== prefs[key])
         if (spectrumEdited && !roomModel.view.entered) values.spectrum = editor.draft
         error = prefsEdited || values.spectrum ? roomModel.saveDefaults(values) : ""
@@ -51,7 +56,7 @@ FocusScope {
         if (!error) cancel()
     }
     onSectionChanged: settingsScroll.contentItem.contentY = 0
-    Shortcut { sequence: "Escape"; enabled: page.visible; onActivated: page.cancel() }
+    Shortcut { sequence: "Escape"; enabled: page.visible && page.activeFocus; onActivated: page.cancel() }
     ColumnLayout {
         anchors { top: parent.top; bottom: parent.bottom; horizontalCenter: parent.horizontalCenter }
         anchors.topMargin: page.portrait ? 12 : 16; anchors.bottomMargin: 12
@@ -108,6 +113,14 @@ FocusScope {
                     visible: page.section === 0; Layout.fillWidth: true; spacing: 8
                     Word { text: "播放与外观"; Layout.topMargin: 4; font.pixelSize: 20; font.weight: Font.DemiBold }
                     Switch { id: coverBackground; objectName: "coverBackgroundSwitch"; text: "使用虚化专辑封面背景" }
+                    RowLayout {
+                        visible: !!windowsTray; Layout.fillWidth: true
+                        Word { text: "关闭窗口时"; Layout.fillWidth: true }
+                        ComboBox { id: closeAction; objectName: "closeAction"; Accessible.name: "关闭窗口时"
+                            readonly property var actions: ["ask", "tray", "exit"]
+                            model: ["每次询问", "最小化到托盘", "退出应用"]
+                        }
+                    }
                     RowLayout {
                         Layout.fillWidth: true
                         Word { text: "动画幅度"; Layout.fillWidth: true }

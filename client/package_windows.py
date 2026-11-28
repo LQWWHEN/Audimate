@@ -15,20 +15,6 @@ BUILD = ROOT / "build" / "windows-package"
 DIST = ROOT / "build" / "distribution"
 
 
-def icon(path):
-    from PIL import Image, ImageDraw
-
-    image = Image.new("RGBA", (256, 256))
-    draw = ImageDraw.Draw(image)
-    draw.rounded_rectangle((4, 4, 251, 251), radius=52, fill="#1d2639")
-    for x, top, bottom in ((68, 96, 167), (123, 58, 196), (175, 83, 169)):
-        start, end = (x+12, top), (x-4, bottom)
-        draw.line((start, end), fill="#b5e4f2", width=16)
-        for px, py in (start, end):
-            draw.ellipse((px-8, py-8, px+8, py+8), fill="#b5e4f2")
-    image.save(path, sizes=[(n, n) for n in (16, 24, 32, 48, 64, 128, 256)])
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dll", type=Path, default=ROOT/"build"/"Release"/"audimate_capture.dll")
@@ -42,11 +28,11 @@ def main():
     BUILD.mkdir(parents=True, exist_ok=True)
     launcher = BUILD/"launch_player.py"
     launcher.write_text("from client.__main__ import main\n\nif __name__ == '__main__':\n    raise SystemExit(main())\n", encoding="utf8")
-    icon_path = BUILD/"audimate.ico"
-    icon(icon_path)
+    icon_path = ROOT/"client"/"audimate.ico"
 
     vendor = ROOT/"server"/"web"/"vendor"
     data = [(ROOT/"client"/"qml", "client/qml"),
+            (icon_path, "client"),
             (ROOT/"client"/"fonts", "client/fonts"),
             (ROOT/"client"/"licenses"/"qt", "licenses/Qt"),
             (vendor/"flac-1.5.0.wasm", "server/web/vendor"),

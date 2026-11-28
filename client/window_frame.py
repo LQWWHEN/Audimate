@@ -106,6 +106,8 @@ class WindowFrame(QObject):
 
     def poll(self):
         w = self.window
+        if w.visibility() == QWindow.Hidden:
+            return
         if not w.property("portrait") or w.visibility() != QWindow.Windowed:
             if self.edge:
                 self.set_edge("")

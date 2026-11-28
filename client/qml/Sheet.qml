@@ -5,6 +5,7 @@ import QtQuick.Layouts
 Popup {
     id: sheet
     property string heading
+    property string dismissText: "关闭"
     font: uiFont
     default property alias body: stack.data
     parent: Overlay.overlay
@@ -28,7 +29,7 @@ Popup {
             RowLayout {
                 Layout.fillWidth: true
                 Word { text: sheet.heading; font.pixelSize: 25; font.weight: Font.Bold; Layout.fillWidth: true }
-                RoomButton { text: "关闭"; quiet: true; onClicked: sheet.close() }
+                RoomButton { text: sheet.dismissText; quiet: true; onClicked: sheet.close() }
             }
         }
     }

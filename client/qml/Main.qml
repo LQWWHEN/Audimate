@@ -12,7 +12,22 @@ ApplicationWindow {
     property string dockEdge: ""
     property real fold: 0
     property bool editingDefaults: false
-    readonly property bool popupOpen: editingDefaults || roundSettings.visible || sourceSheet.visible
+    readonly property bool popupOpen: editingDefaults || roundSettings.visible || sourceSheet.visible || closeSheet.visible
+    onClosing: function(event) {
+        if (!windowsTray || windowsTray.exiting()) return
+        event.accepted = false
+        if (closeSheet.visible) return
+        const action = room.localDefaults.closeAction
+        if (action === "exit") {
+            Qt.callLater(function() { windowsTray.quitApplication() })
+        } else if (action !== "tray" || !windowsTray.hideWindow()) {
+            windowsTray.restore()
+            closeSheet.trayAvailable = windowsTray.available()
+            rememberClose.checked = false
+            closeSheet.error = ""
+            closeSheet.open()
+        }
+    }
     minimumWidth: portrait ? 420 : 960
     minimumHeight: editingDefaults ? (portrait ? 600 : 560) : Math.ceil(Math.max(portrait ? 600 : 560, titleBar.height + footerBar.height
         + (v.entered ? (portrait ? infoHeight + song.height + 128 : Math.max(infoHeight + 44, song.height + 180))
@@ -327,5 +342,40 @@ ApplicationWindow {
             onClicked: { room.threshold(threshold.text); roundSettings.close() } }
     }
     SourceSheet { id:sourceSheet; objectName: "sourceSheet"; room: win.roomModel }
+    Sheet {
+        id: closeSheet; objectName: "closeSheet"
+        heading: "关闭 Audimate"; dismissText: "取消"
+        // A hidden window cannot advance a pending popup exit animation.
+        exit: Transition {}
+        property bool trayAvailable: false
+        property string error: ""
+        function choose(action) {
+            if (action === "tray" && !windowsTray.available()) {
+                trayAvailable = false
+                return
+            }
+            if (rememberClose.checked) {
+                error = room.saveDefaults({closeAction: action})
+                if (error) return
+                if (win.editingDefaults) localPage.loadCloseAction(action)
+            }
+            if (action === "exit") {
+                windowsTray.quitApplication()
+            } else if (windowsTray.hideWindow()) {
+                close()
+            } else {
+                trayAvailable = false
+            }
+        }
+        Word { Layout.fillWidth: true; wrapMode: Text.Wrap
+            text: closeSheet.trayAvailable ? "收起到系统托盘后，主持和收听会继续。点击托盘图标可恢复窗口。" : "系统托盘暂不可用，可取消或退出应用。" }
+        CheckBox { id: rememberClose; text: "记住我的选择"; objectName: "rememberClose" }
+        Word { visible: !!text; text: closeSheet.error; Layout.fillWidth: true; wrapMode: Text.Wrap; color: "#f4ba92" }
+        RowLayout {
+            Layout.alignment: Qt.AlignRight
+            RoomButton { text: "退出应用"; onClicked: closeSheet.choose("exit") }
+            RoomButton { text: "最小化到托盘"; primary: true; enabled: closeSheet.trayAvailable; onClicked: closeSheet.choose("tray") }
+        }
+    }
     property var roomModel: room
 }
