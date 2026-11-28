@@ -34,6 +34,14 @@ def build_window(model):
     engine.rootContext().setContextProperty("uiFont", font)
     engine.window_frame = WindowFrame(engine)
     engine.rootContext().setContextProperty("frameControl", engine.window_frame)
+    tray = None
+    if sys.platform == "win32":
+        from PySide6.QtWidgets import QApplication
+        if isinstance(QGuiApplication.instance(), QApplication):
+            from .windows_tray import WindowsTray
+            tray = WindowsTray(engine.window_frame)
+    engine.tray = tray
+    engine.rootContext().setContextProperty("windowsTray", tray)
     engine.rootContext().setContextProperty("room",model)
     engine.load(QUrl.fromLocalFile(str(Path(__file__).parent / "qml" / "Main.qml")))
     if not engine.rootObjects():
@@ -46,7 +54,12 @@ def build_window(model):
 
 def launch(dll, development, demo):
     QQuickStyle.setStyle("Material")
-    app = QGuiApplication(sys.argv[:1])
+    if sys.platform == "win32":
+        from PySide6.QtWidgets import QApplication
+        app = QApplication(sys.argv[:1])
+        app.setQuitOnLastWindowClosed(False)
+    else:
+        app = QGuiApplication(sys.argv[:1])
     app.setApplicationName("Audimate")
     model = RoomView(dll,development)
     engine,window = build_window(model)
