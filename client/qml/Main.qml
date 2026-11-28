@@ -326,7 +326,8 @@ ApplicationWindow {
         }
     }
     Rectangle {
-        visible: win.fold > .97
+        opacity: Math.max(0, (win.fold - .80) / .20)
+        visible: opacity > 0
         width: win.dockEdge === "top" ? 62 : 4
         height: win.dockEdge === "top" ? 4 : 62
         radius: 2; color: "#abd9f1"
