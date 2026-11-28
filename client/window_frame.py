@@ -1,13 +1,14 @@
 """Window placement and edge folding in Qt logical desktop coordinates."""
 import time
 
-from PySide6.QtCore import QObject, QPoint, QRect, QSize, Qt, QTimer, QVariantAnimation, QEasingCurve, Slot
+from PySide6.QtCore import QAbstractAnimation, QObject, QPoint, QRect, QSize, Qt, QTimer, QVariantAnimation, QEasingCurve, Slot
 from PySide6.QtGui import QCursor, QGuiApplication, QRegion, QWindow
 
 
 SNAP = 12
 LIP = 6
-HIDE_DELAY = 1.4
+HIDE_DELAY = 1.0
+SLIDE_MS = 360
 
 
 def dock_edge(rect, area):
@@ -49,7 +50,10 @@ class WindowFrame(QObject):
         self.drag_point = None
         self.dragged = False
         self.animation = QVariantAnimation(self)
-        self.animation.setEasingCurve(QEasingCurve.OutCubic)
+        self.animation.setStartValue(0.)
+        self.animation.setEndValue(1.)
+        self.animation.setDuration(SLIDE_MS)
+        self.animation.setEasingCurve(QEasingCurve.InOutSine)
         self.animation.valueChanged.connect(self.set_fold)
         self.timer = QTimer(self)
         self.timer.setInterval(70)
@@ -76,7 +80,7 @@ class WindowFrame(QObject):
             return
         self.animation.stop()
         self.hiding = False
-        self.set_fold(0.)
+        self.animation.setCurrentTime(0)
         self.edge = edge
         self.window.setProperty("dockEdge", edge)
         self.window.setFlag(Qt.WindowStaysOnTopHint, bool(edge))
@@ -98,11 +102,15 @@ class WindowFrame(QObject):
         if self.hiding == hide:
             return
         self.hiding = hide
-        self.animation.stop()
-        self.animation.setStartValue(self.fold)
-        self.animation.setEndValue(1. if hide else 0.)
-        self.animation.setDuration(1 if self.window.property("reduced") else 165)
-        self.animation.start()
+        if self.window.property("reduced"):
+            self.animation.stop()
+            self.animation.setCurrentTime(SLIDE_MS if hide else 0)
+            return
+        # Reverse the same timeline so the mask and content stay at the pointer's
+        # current reveal position when it re-enters during a slide.
+        self.animation.setDirection(QAbstractAnimation.Forward if hide else QAbstractAnimation.Backward)
+        if self.animation.state() != QAbstractAnimation.Running:
+            self.animation.start()
 
     def poll(self):
         w = self.window

@@ -5,10 +5,47 @@ from unittest.mock import Mock, patch
 from PySide6.QtCore import QPoint, QRect, Qt
 from PySide6.QtGui import QWindow
 
-from .window_frame import HIDE_DELAY, LIP, WindowFrame, dock_edge, exposed, fit
+from .window_frame import HIDE_DELAY, LIP, SLIDE_MS, WindowFrame, dock_edge, exposed, fit
 
 
 class EdgeTests(unittest.TestCase):
+    def test_reverse_from_current_position_and_clear_mask_when_undocked(self):
+        frame = WindowFrame(None)
+        w = frame.window = Mock()
+        w.property.return_value = False
+        w.size.return_value = QRect(0, 0, 420, 600).size()
+        frame.set_edge("right")
+        frame.animate(True)
+        frame.animation.setCurrentTime(SLIDE_MS // 4)
+        quarter = frame.fold
+        self.assertGreater(quarter, 0)
+        self.assertLess(quarter, .25)
+        before_turn = w.setMask.call_args
+        frame.animate(False)
+        self.assertEqual(frame.fold, quarter)
+        self.assertEqual(w.setMask.call_args, before_turn)
+        frame.animation.setCurrentTime(SLIDE_MS // 8)
+        self.assertLess(frame.fold, quarter)
+        frame.animate(True)
+        frame.animation.setCurrentTime(SLIDE_MS * 3 // 4)
+        self.assertAlmostEqual(frame.fold, 1 - quarter)
+        frame.set_edge("")
+        self.assertEqual(frame.fold, 0)
+        self.assertTrue(w.setMask.call_args.args[0].isEmpty())
+
+    def test_reduced_motion_reaches_both_endpoints_immediately(self):
+        frame = WindowFrame(None)
+        w = frame.window = Mock()
+        w.property.return_value = True
+        w.size.return_value = QRect(0, 0, 420, 600).size()
+        frame.set_edge("top")
+        frame.animate(True)
+        self.assertEqual(frame.fold, 1)
+        self.assertEqual(w.setMask.call_args.args[0].boundingRect().height(), LIP)
+        frame.animate(False)
+        self.assertEqual(frame.fold, 0)
+        self.assertTrue(w.setMask.call_args.args[0].isEmpty())
+
     def test_snap_and_reveal_use_the_current_monitors_work_area(self):
         area = QRect(-1600, 40, 1600, 860)
         for side, x, y in (("left", -1593, 100), ("right", -425, 120), ("top", -1200, 45)):
@@ -43,7 +80,10 @@ class EdgeTests(unittest.TestCase):
         clock.return_value = 10
         frame.poll()
         frame.animate.assert_not_called()
-        clock.return_value += HIDE_DELAY+.01
+        clock.return_value += HIDE_DELAY-.01
+        frame.poll()
+        frame.animate.assert_not_called()
+        clock.return_value += .02
         frame.poll()
         frame.animate.assert_called_with(True)
         frame.fold = 1.
